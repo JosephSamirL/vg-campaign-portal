@@ -24,6 +24,7 @@ create temp table t_allow_anon_exec(fn text);          -- 5.1: get_shared_result
 
 create temp table t_allow_auth_exec(fn text);
 insert into t_allow_auth_exec values ('current_brand_id'), ('current_app_role');
+insert into t_allow_auth_exec values ('is_contactable');   -- Story 3.1: security invoker, inlinable predicate (D-4)
 
 create temp table t_allow_secdef(fn text);
 insert into t_allow_secdef values ('current_brand_id'), ('current_app_role');
@@ -85,6 +86,10 @@ begin
   insert into public.import_issues (brand_id, run_id, source_file, row_no, severity, reason, detail)
   values (ba, '00000000-0000-4000-8000-0000000000a1', 'fixture-a.csv', 2, 'warn', 'consent_unknown', '{"value": "maybe"}'),
          (bb, '00000000-0000-4000-8000-0000000000b1', 'fixture-b.csv', 2, 'warn', 'consent_unknown', '{"value": "maybe"}');
+  -- Story 3.1: metric_rules is shared (no brand_id; nine rows seeded by 0005_metrics.sql itself), so
+  -- brand_counts() never enumerates it — B7/B8 do not apply; B10 below asserts the shared read instead.
+  -- The four views (v_dashboard_totals, v_signups_30d, v_campaign_performance, v_contacts) expose brand_id
+  -- and are fed by the contacts / campaigns / brands fixtures above: own > 0 (1 / 30 / 1 / 1), other = 0.
 end $$;
 
 -- Supabase's documented RLS-test pattern: request.jwt.claims + role authenticated, transaction-local.
@@ -269,6 +274,9 @@ select is(other, 0::bigint, 'B8 other-brand rows = 0: ' || rel) from pg_temp.bra
 -- per-RPC cross-brand negatives (Story 4.1+: throws_ok(…, 'not_in_brand'))
 -- Each security-definer RPC added to t_allow_secdef gets a call here with brand B's ids, e.g.:
 --   select throws_ok($$ select public.create_send('<brand-B campaign id>') $$, 'not_in_brand', 'create_send refuses brand B');
+
+-- Story 3.1: shared tables (no brand_id, policy on auth.uid()) — readable by any signed-in user, exempt from B8.
+select cmp_ok((select count(*) from public.metric_rules), '>', 0::bigint, 'B10 shared table readable when signed in: public.metric_rules');
 
 select pg_temp.as_postgres();
 select is(current_user::text, 'postgres', 'B9 role restored to postgres before finish');

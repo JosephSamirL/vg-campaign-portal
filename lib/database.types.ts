@@ -61,6 +61,13 @@ export type Database = {
             referencedRelation: "brands"
             referencedColumns: ["id"]
           },
+          {
+            foreignKeyName: "app_users_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "v_signups_30d"
+            referencedColumns: ["brand_id"]
+          },
         ]
       }
       brands: {
@@ -157,11 +164,25 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
+            foreignKeyName: "campaigns_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "v_signups_30d"
+            referencedColumns: ["brand_id"]
+          },
+          {
             foreignKeyName: "campaigns_parent_campaign_id_fkey"
             columns: ["parent_campaign_id"]
             isOneToOne: false
             referencedRelation: "campaigns"
             referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "campaigns_parent_campaign_id_fkey"
+            columns: ["parent_campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_campaign_performance"
+            referencedColumns: ["campaign_id"]
           },
         ]
       }
@@ -243,6 +264,13 @@ export type Database = {
             referencedRelation: "brands"
             referencedColumns: ["id"]
           },
+          {
+            foreignKeyName: "contacts_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "v_signups_30d"
+            referencedColumns: ["brand_id"]
+          },
         ]
       }
       events: {
@@ -300,6 +328,13 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
+            foreignKeyName: "events_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "v_signups_30d"
+            referencedColumns: ["brand_id"]
+          },
+          {
             foreignKeyName: "events_campaign_id_fkey"
             columns: ["campaign_id"]
             isOneToOne: false
@@ -307,10 +342,24 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
+            foreignKeyName: "events_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_campaign_performance"
+            referencedColumns: ["campaign_id"]
+          },
+          {
             foreignKeyName: "events_contact_id_fkey"
             columns: ["contact_id"]
             isOneToOne: false
             referencedRelation: "contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "events_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "v_contacts"
             referencedColumns: ["id"]
           },
         ]
@@ -353,6 +402,13 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "brands"
             referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "import_issues_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "v_signups_30d"
+            referencedColumns: ["brand_id"]
           },
           {
             foreignKeyName: "import_issues_run_id_fkey"
@@ -402,10 +458,217 @@ export type Database = {
             referencedRelation: "brands"
             referencedColumns: ["id"]
           },
+          {
+            foreignKeyName: "import_runs_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "v_signups_30d"
+            referencedColumns: ["brand_id"]
+          },
         ]
+      }
+      metric_rules: {
+        Row: {
+          alternative_text: string
+          key: string
+          label: string
+          rule_text: string
+        }
+        Insert: {
+          alternative_text: string
+          key: string
+          label: string
+          rule_text: string
+        }
+        Update: {
+          alternative_text?: string
+          key?: string
+          label?: string
+          rule_text?: string
+        }
+        Relationships: []
       }
     }
     Views: {
+      v_campaign_performance: {
+        Row: {
+          bounce_rate: number | null
+          bounced: number | null
+          brand_id: string | null
+          campaign_id: string | null
+          channel: string | null
+          click_rate: number | null
+          clicks: number | null
+          delivered: number | null
+          delivered_rate: number | null
+          external_id: string | null
+          name: string | null
+          open_rate: number | null
+          opens: number | null
+          send_id: string | null
+          sent: number | null
+          sent_at: string | null
+          source: string | null
+          spend: number | null
+          target_country: string | null
+          unsubscribe_rate: number | null
+          unsubscribes: number | null
+        }
+        Insert: {
+          bounce_rate?: never
+          bounced?: number | null
+          brand_id?: string | null
+          campaign_id?: string | null
+          channel?: string | null
+          click_rate?: never
+          clicks?: number | null
+          delivered?: number | null
+          delivered_rate?: never
+          external_id?: string | null
+          name?: string | null
+          open_rate?: never
+          opens?: number | null
+          send_id?: never
+          sent?: number | null
+          sent_at?: string | null
+          source?: never
+          spend?: number | null
+          target_country?: string | null
+          unsubscribe_rate?: never
+          unsubscribes?: never
+        }
+        Update: {
+          bounce_rate?: never
+          bounced?: number | null
+          brand_id?: string | null
+          campaign_id?: string | null
+          channel?: string | null
+          click_rate?: never
+          clicks?: number | null
+          delivered?: number | null
+          delivered_rate?: never
+          external_id?: string | null
+          name?: string | null
+          open_rate?: never
+          opens?: number | null
+          send_id?: never
+          sent?: number | null
+          sent_at?: string | null
+          source?: never
+          spend?: number | null
+          target_country?: string | null
+          unsubscribe_rate?: never
+          unsubscribes?: never
+        }
+        Relationships: [
+          {
+            foreignKeyName: "campaigns_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "brands"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "campaigns_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "v_signups_30d"
+            referencedColumns: ["brand_id"]
+          },
+        ]
+      }
+      v_contacts: {
+        Row: {
+          brand_id: string | null
+          city: string | null
+          consent_marketing: boolean | null
+          contactable: boolean | null
+          country: string | null
+          email: string | null
+          external_id: string | null
+          full_name: string | null
+          id: string | null
+          phone: string | null
+          signup_at: string | null
+          status: string | null
+          suppressed_at: string | null
+          suppressed_reason: string | null
+          suppressed_until: string | null
+        }
+        Insert: {
+          brand_id?: string | null
+          city?: string | null
+          consent_marketing?: boolean | null
+          contactable?: never
+          country?: string | null
+          email?: string | null
+          external_id?: string | null
+          full_name?: string | null
+          id?: string | null
+          phone?: string | null
+          signup_at?: string | null
+          status?: string | null
+          suppressed_at?: string | null
+          suppressed_reason?: string | null
+          suppressed_until?: string | null
+        }
+        Update: {
+          brand_id?: string | null
+          city?: string | null
+          consent_marketing?: boolean | null
+          contactable?: never
+          country?: string | null
+          email?: string | null
+          external_id?: string | null
+          full_name?: string | null
+          id?: string | null
+          phone?: string | null
+          signup_at?: string | null
+          status?: string | null
+          suppressed_at?: string | null
+          suppressed_reason?: string | null
+          suppressed_until?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "contacts_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "brands"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "contacts_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "v_signups_30d"
+            referencedColumns: ["brand_id"]
+          },
+        ]
+      }
+      v_dashboard_totals: {
+        Row: {
+          brand_id: string | null
+          contactable: number | null
+          total_customers: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "contacts_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "brands"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "contacts_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "v_signups_30d"
+            referencedColumns: ["brand_id"]
+          },
+        ]
+      }
       v_import_issue_groups: {
         Row: {
           brand_id: string | null
@@ -423,6 +686,13 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
+            foreignKeyName: "import_issues_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "v_signups_30d"
+            referencedColumns: ["brand_id"]
+          },
+          {
             foreignKeyName: "import_issues_run_id_fkey"
             columns: ["run_id"]
             isOneToOne: false
@@ -431,6 +701,17 @@ export type Database = {
           },
         ]
       }
+      v_signups_30d: {
+        Row: {
+          brand_id: string | null
+          day: string | null
+          future_dated_count: number | null
+          signups: number | null
+          window_end: string | null
+          window_start: string | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
       current_app_role: {
@@ -438,6 +719,10 @@ export type Database = {
         Returns: Database["public"]["Enums"]["app_role"]
       }
       current_brand_id: { Args: never; Returns: string }
+      is_contactable: {
+        Args: { c: Database["public"]["Tables"]["contacts"]["Row"] }
+        Returns: boolean
+      }
       normalize_event_type: {
         Args: { p: string }
         Returns: Database["public"]["Enums"]["event_type"]

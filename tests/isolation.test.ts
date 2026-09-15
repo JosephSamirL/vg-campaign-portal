@@ -16,11 +16,24 @@ import type { Database } from "../lib/database.types";
  * Unconfigured: skipped with a loud console message locally; a hard failure under CI.
  * Non-local TEST_SUPABASE_URL: refused unless ALLOW_HOSTED_TESTS=1 is set explicitly.
  */
-export const TABLES = ["brands", "app_users", "contacts", "campaigns", "events", "import_runs", "import_issues"] as const satisfies readonly (
-  keyof Database["public"]["Tables"]
-)[];
+export const TABLES = [
+  "brands",
+  "app_users",
+  "contacts",
+  "campaigns",
+  "events",
+  "import_runs",
+  "import_issues",
+  "metric_rules", // Story 3.1: shared (no brand_id) — readable when signed in, refused anonymously
+] as const satisfies readonly (keyof Database["public"]["Tables"])[];
 /** Exposed views (Story 2.3+): same isolation contract as the tables they read. */
-export const VIEWS = ["v_import_issue_groups"] as const satisfies readonly (keyof Database["public"]["Views"])[];
+export const VIEWS = [
+  "v_import_issue_groups",
+  "v_dashboard_totals", // Story 3.1: the four metrics views, security_invoker
+  "v_signups_30d",
+  "v_campaign_performance",
+  "v_contacts",
+] as const satisfies readonly (keyof Database["public"]["Views"])[];
 const RELATIONS = [...TABLES, ...VIEWS] as const;
 type Relation = (typeof RELATIONS)[number];
 
@@ -28,10 +41,25 @@ type Relation = (typeof RELATIONS)[number];
  * Tables that are guaranteed to hold a KILELE row on the local stack. `brands`/`app_users`
  * are filled by the migrations + seed.sql; `contacts`/`campaigns`/`events` and the import report
  * (`import_runs`/`import_issues`/`v_import_issue_groups`) by `pnpm seed` — the documented local
- * setup since Story 2.4 (README "Seed load counts"). The own-brand > 0 check therefore covers every
- * relation; the anonymous refusal and the "no foreign brand_id" checks run regardless.
+ * setup since Story 2.4 (README "Seed load counts"); `metric_rules` and the metrics views (Story 3.1)
+ * are filled by the migration / derived from the seeded tables. The own-brand > 0 check therefore
+ * covers every relation; the anonymous refusal and the "no foreign brand_id" checks run regardless.
  */
-const SEEDED_TABLES: readonly Relation[] = ["brands", "app_users", "contacts", "campaigns", "events", "import_runs", "import_issues", "v_import_issue_groups"];
+const SEEDED_TABLES: readonly Relation[] = [
+  "brands",
+  "app_users",
+  "contacts",
+  "campaigns",
+  "events",
+  "import_runs",
+  "import_issues",
+  "v_import_issue_groups",
+  "metric_rules", // nine rows seeded by 0005_metrics.sql itself
+  "v_dashboard_totals", // one row per visible brand; v_signups_30d always has 30 rows per brand
+  "v_signups_30d",
+  "v_campaign_performance",
+  "v_contacts",
+];
 
 const OWN_BRAND = "KILELE";
 const OTHER_BRANDS = ["KAROO", "MARRAKECH"];
