@@ -86,7 +86,7 @@ export default async function CampaignsPage() {
         {!sync.ok || !pollStatus.ok ? (
           <SyncStatusAlert message={!sync.ok ? sync.message : !pollStatus.ok ? pollStatus.message : ""} />
         ) : (
-          <LastSynced last_ok_at={sync.data?.last_ok_at ?? null} warning={syncWarning(pollStatus.data?.status, sync.data?.last_ok_at)} />
+          <LastSynced last_ok_at={sync.data?.last_ok_at ?? null} has_batches={sync.data !== null} warning={syncWarning(pollStatus.data, sync.data?.last_ok_at)} />
         )}
       </div>
 

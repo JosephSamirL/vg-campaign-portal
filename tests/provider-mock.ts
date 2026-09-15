@@ -28,7 +28,9 @@ import { fileURLToPath } from "node:url";
  *                                       that order (shuffled per page when `shuffle`), `page_size` overrides the global
  *                                       one for this batch, `duplicate_across_pages` (default true) repeats ~10 % of the
  *                                       previous page, `released` caps how many source events are visible (default all)
- *                                       — raise it between two poll runs to release the second half of the stream.
+ *                                       — raise it between two poll runs to release the second half of the stream;
+ *                                       `endless` (default false) never closes the stream: every page carries one
+ *                                       event (cycling through `events`) and a fresh cursor — the page-cap drill.
  *   POST /__mock/reset                  forget every batch, call and override.
  *   POST /__mock/config                 { status?, reject_ids?, latency_ms?, page_size?, blank_body?, events_status?,
  *                                       events_fail_next?, events_retry_after? } — `status` forces the next POSTs to
@@ -40,6 +42,9 @@ import { fileURLToPath } from "node:url";
  *                                       `events_fail_next` GET /events (default: every one while set) to answer that
  *                                       code with the probe's error body — a 429 / 503 carries `Retry-After:
  *                                       <events_retry_after>` (header AND body `retry_after`, default 1 s).
+ *                                       `events_malformed_next` answers the next N GETs with a 200 whose body is not
+ *                                       JSON; `events_null_cursor` (while true) answers every page of a programmed
+ *                                       batch with `has_more: true` and `next_cursor: null` — D-8's contract violation.
  *   GET  /__mock/calls                  [{ key, batch_id, status }] — every POST /v1/messages seen, in order.
  *   GET  /__mock/reads                  [{ batch_id, since, status, events, has_more }] — every GET /events seen.
  *
@@ -61,6 +66,8 @@ export type BatchProgram = {
   duplicate_across_pages?: boolean;
   /** How many of `events` (in canonical order) are visible; the rest are "not yet reported" — the stream stays open. */
   released?: number;
+  /** Never close: one event per page (cycling) and a fresh cursor every time — the poller must stop at its page cap. */
+  endless?: boolean;
 };
 
 export type MockCall = { key: string | null; batch_id: string | null; status: number; recipients: number; replay: boolean };
@@ -81,6 +88,10 @@ export type MockConfig = {
   events_fail_next?: number;
   /** Seconds in `Retry-After` (header + body) for a forced 429 / 503. */
   events_retry_after?: number;
+  /** Story 6.3 review: answer the next N GET /events with a 200 whose body is not JSON (a malformed 2xx). */
+  events_malformed_next?: number;
+  /** Story 6.3 review: while true, a programmed batch answers has_more: true with next_cursor: null (cursor_contract_violation). */
+  events_null_cursor?: boolean;
 };
 
 export type MockRead = { batch_id: string; since: string | null; status: number; events: number; has_more: boolean | null };
@@ -97,7 +108,7 @@ export type ProviderMockState = {
 };
 
 export function freshConfig(): Required<MockConfig> {
-  return { status: null, reject_ids: [], latency_ms: 0, page_size: DEFAULT_PAGE_SIZE, blank_body: false, events_status: null, events_fail_next: 0, events_retry_after: 1 };
+  return { status: null, reject_ids: [], latency_ms: 0, page_size: DEFAULT_PAGE_SIZE, blank_body: false, events_status: null, events_fail_next: 0, events_retry_after: 1, events_malformed_next: 0, events_null_cursor: false };
 }
 
 export function freshState(): ProviderMockState {
@@ -184,6 +195,10 @@ export type EventsPageResponse = { events: Array<MockEvent | ProgrammedEvent>; n
 export function eventsPage(batch: Batch, offset: number, pageSize: number): EventsPageResponse {
   const program = batch.program;
   const all: Array<MockEvent | ProgrammedEvent> = program ? program.events : batch.events;
+  if (program?.endless && all.length > 0) {
+    // the stream that never ends: one event per page, always a new cursor, has_more forever
+    return { events: [all[offset % all.length]], next_cursor: encodeCursor(batch.batch_id, offset + 1), has_more: true };
+  }
   const visible = program ? Math.min(program.released, all.length) : all.length;
   const size = program ? program.page_size : pageSize;
   const duplicate = program ? program.duplicate_across_pages : true;
@@ -218,6 +233,7 @@ export function parseBatchProgram(raw: unknown): Required<BatchProgram> | null {
     shuffle: body.shuffle !== false,
     duplicate_across_pages: body.duplicate_across_pages !== false,
     released,
+    endless: body.endless === true,
   };
 }
 
@@ -273,6 +289,8 @@ export function createProviderMock(state: ProviderMockState = freshState()): { s
         if ("events_status" in patch) state.config.events_status = typeof patch.events_status === "number" ? patch.events_status : null;
         if (typeof patch.events_fail_next === "number") state.config.events_fail_next = Math.max(0, Math.floor(patch.events_fail_next));
         if (typeof patch.events_retry_after === "number") state.config.events_retry_after = Math.max(0, patch.events_retry_after);
+        if (typeof patch.events_malformed_next === "number") state.config.events_malformed_next = Math.max(0, Math.floor(patch.events_malformed_next));
+        if (typeof patch.events_null_cursor === "boolean") state.config.events_null_cursor = patch.events_null_cursor;
         return send(res, 200, state.config);
       }
       if (url.pathname === "/__mock/calls" && method === "GET") return send(res, 200, state.calls);
@@ -380,6 +398,14 @@ export function createProviderMock(state: ProviderMockState = freshState()): { s
           if (forced === 404) return send(res, 404, { error: "not_found", message: "unknown batch_id" });
           return send(res, forced, { error: `forced_${forced}`, message: `mock forced status ${forced}` });
         }
+        if (state.config.events_malformed_next > 0) {
+          // a 2xx that is not the contract: the poller must record provider_error for the batch and touch no cursor
+          state.config.events_malformed_next -= 1;
+          state.reads.push({ batch_id: requestedId, since: sinceParam, status: 200, events: 0, has_more: null });
+          const text = "<html>not json</html>";
+          res.writeHead(200, { "Content-Type": "text/html", "Content-Length": Buffer.byteLength(text) });
+          return res.end(text);
+        }
         const batch = state.batches.get(requestedId);
         if (!batch) {
           state.reads.push({ batch_id: requestedId, since: sinceParam, status: 404, events: 0, has_more: null });
@@ -393,6 +419,11 @@ export function createProviderMock(state: ProviderMockState = freshState()): { s
           if (decoded && decoded.b === batch.batch_id) offset = decoded.o;
         }
         const page = eventsPage(batch, offset, state.config.page_size);
+        if (state.config.events_null_cursor && batch.program) {
+          // D-8's cursor_contract_violation, unobserved on the real provider: has_more with nothing to follow
+          page.has_more = true;
+          page.next_cursor = null;
+        }
         state.reads.push({ batch_id: batch.batch_id, since: sinceParam, status: 200, events: page.events.length, has_more: page.has_more });
         return send(res, 200, page);
       }

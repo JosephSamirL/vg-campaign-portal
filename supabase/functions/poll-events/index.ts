@@ -14,7 +14,8 @@
  *              REGARDLESS of sends.status (a `partial` send still gets reports), oldest-polled first
  *              (`last_polled_at asc nulls first`); no new batch starts after 50 s (pg_net's timeout is 60 s)
  *   per batch  ONE transaction on a direct Postgres connection (_shared/db.ts): pg_try_advisory_xact_lock(
- *              hashtext(batch_id)) — false → skip (another run holds it); then ≤ 10 pages:
+ *              hashtext(batch_id)) — false → skip (another run holds it); then ≤ 10 pages, each page re-checking
+ *              the 50-s deadline first (10 pages × 20-s timeouts must never outlive pg_net's 60 s):
  *                since  = the stored next_cursor, or omitted — NEVER an event id (probe b: the real provider
  *                         ignores one and replays the whole stream; ingest's (batch_id, event_id) dedupe absorbs it)
  *                2xx    internal.ingest_provider_events(send_id, batch_id, events) → inserted / duplicates, then the
@@ -27,14 +28,22 @@
  *                has_more = true with next_cursor = null → `cursor_contract_violation:<batch_id>`, stop the batch
  *                401    auth_error — abort the run (the key is wrong for every batch)
  *                429 / 503  honour Retry-After (header → body `retry_after` → 5 s): ≤ 10 s and inside the budget →
- *                         wait and retry the same page; otherwise stop: `rate_limited` (429) / `deferred` (503) —
- *                         both are per key / provider-wide, so the run ends rather than hammering the next batch
+ *                         wait and retry the same page; otherwise this BATCH is `rate_limited` (429) / `deferred`
+ *                         (503) and the run continues with the next batch (probe e: isolated 16–18 s 503s on ~30 %
+ *                         of reads are "not an error"; a whole run must not stop on one of them). Its last_polled_at
+ *                         is left untouched so it heads the next run.
  *                404 / other 4xx / 5xx / timeout / unreadable body → `provider_error` for this batch, next batch
- *              Error paths never write next_cursor / last_event_id; every attempted batch bumps last_polled_at so a
- *              batch that keeps failing cannot starve the others; last_ok_at moves only after an ingested page.
+ *                any exception inside the batch (ingest raising, a deadlock, a statement timeout) → the transaction
+ *                         rolls back, `provider_error:<batch_id>:<message>`, last_polled_at bumped OUTSIDE the
+ *                         rolled-back transaction, next batch — a batch that keeps failing never wedges the run
+ *              Error paths never write next_cursor / last_event_id. last_polled_at is bumped after a provider_error
+ *              or an ingested page (round-robin: a batch that keeps failing cannot starve the others) and left alone
+ *              on 401 / un-waitable 429 / 503 (the batch is retried first); last_ok_at moves only after an ingested
+ *              page — a `cursor_contract_violation` bumps last_polled_at only.
  *   end        ALWAYS: internal.complete_sends() (reporting → complete 24 h after dispatch), then poll_log(status,
- *              finished_at, batches, pages, inserted, duplicates, error). Status precedence: auth_error >
- *              provider_error > rate_limited > deferred > ok; an uncaught exception → failed.
+ *              finished_at, batches, pages, inserted, duplicates, error) — compare-and-set on status = 'running',
+ *              so a row poll-log-reconcile already closed as failed / no_response is never overwritten. Status
+ *              precedence: auth_error > provider_error > rate_limited > deferred > ok; an uncaught exception → failed.
  *   response   200 { status, batches, pages, inserted, duplicates } — the run is recorded whatever it found.
  *   logs       one JSON line per step: { fn: 'poll-events', poll_log_id, batch_id, step, ok, ms, … }.
  */
@@ -59,7 +68,8 @@ type IngestRow = { inserted: number; duplicates: number; foreign_recipient: numb
 
 type Totals = { batches: number; skipped: number; pages: number; inserted: number; duplicates: number; foreign: number; unknown: number; errors: string[]; status: RunStatus };
 
-type BatchOutcome = { status: RunStatus; abortRun: boolean; error?: string };
+/** `skipTouch`: leave last_polled_at alone (an un-waitable 429 / 503 — the batch should head the next run). */
+type BatchOutcome = { status: RunStatus; abortRun: boolean; skipTouch?: boolean; error?: string };
 
 function json(status: number, body: Record<string, unknown>): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -110,6 +120,11 @@ async function pollBatch(sql: Sql, pollLogId: number, batch: BatchRow, deadline:
     let touched = false; // an ingested page moved last_ok_at (and last_polled_at) already
 
     for (let page = 1; page <= MAX_PAGES_PER_BATCH; page++) {
+      if (Date.now() >= deadline) {
+        // the run budget applies per page too: ten 20-s timeouts inside one transaction would outlive pg_net's 60 s
+        log("budget", false, 0, { page, outcome: "deadline" });
+        break;
+      }
       // probe row b: `since` carries the stored next_cursor only; a batch with none omits it (never an event id)
       t = stopwatch();
       const result = await getEvents(batchId, expected);
@@ -130,8 +145,10 @@ async function pollBatch(sql: Sql, pollLogId: number, batch: BatchRow, deadline:
           page -= 1; // the same page again — a wait is not a page
           continue;
         }
+        // un-waitable: this batch is deferred / rate-limited, the run goes on (only a 401 aborts the run);
+        // last_polled_at stays untouched so the batch is first next time
         log("get", false, ms, { page, status: result.status, retry_after_s: wait, outcome: kind });
-        outcome = { status: kind, abortRun: true, error: `${kind}:${batchId}:retry_after_${wait}s` };
+        outcome = { status: kind, abortRun: false, skipTouch: true, error: `${kind}:${batchId}:retry_after_${wait}s` };
         break;
       }
 
@@ -158,9 +175,10 @@ async function pollBatch(sql: Sql, pollLogId: number, batch: BatchRow, deadline:
       log("ingest", true, t(), { page, inserted: ingested?.inserted ?? 0, duplicates: ingested?.duplicates ?? 0, foreign_recipient: ingested?.foreign_recipient ?? 0, unknown_type: ingested?.unknown_type ?? 0 });
 
       if (hasMore && nextCursor === null) {
-        // D-8: unobserved on the real provider, kept — the page was ingested, the cursor columns stay untouched
+        // D-8: unobserved on the real provider, kept — the page was ingested, the cursor columns stay untouched;
+        // last_polled_at only: the batch is recorded provider_error, so "reports last synced" must not advance
         t = stopwatch();
-        await tx`update public.provider_batches set last_polled_at = now(), last_ok_at = now() where send_id = ${sendId}`;
+        await tx`update public.provider_batches set last_polled_at = now() where send_id = ${sendId}`;
         touched = true;
         log("cursor", false, t(), { page, outcome: "cursor_contract_violation" });
         outcome = { status: "provider_error", abortRun: false, error: `cursor_contract_violation:${batchId}` };
@@ -190,7 +208,7 @@ async function pollBatch(sql: Sql, pollLogId: number, batch: BatchRow, deadline:
       expected = nextCursor;
     }
 
-    if (!touched && !outcome.abortRun) {
+    if (!touched && !outcome.abortRun && !outcome.skipTouch) {
       // a failed attempt still counts as a poll (round-robin), but never as a success
       await tx`update public.provider_batches set last_polled_at = now() where send_id = ${sendId}`;
     }
@@ -218,7 +236,21 @@ async function run(sql: Sql, pollLogId: number, windowHours: number): Promise<To
       stopped = "budget";
       break;
     }
-    const outcome = await pollBatch(sql, pollLogId, batch, deadline, totals);
+    let outcome: BatchOutcome;
+    try {
+      outcome = await pollBatch(sql, pollLogId, batch, deadline, totals);
+    } catch (error) {
+      // the batch's transaction rolled back (ingest raised, deadlock, statement timeout, …): provider_error for this
+      // batch, last_polled_at bumped outside the rolled-back transaction so it does not head every run, next batch
+      const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      logStep({ fn: FN, send_id: batch.send_id, poll_log_id: pollLogId, batch_id: batch.batch_id, step: "batch", ok: false, ms: 0, error: message });
+      try {
+        await sql`update public.provider_batches set last_polled_at = now() where send_id = ${batch.send_id}`;
+      } catch (touchError) {
+        logStep({ fn: FN, send_id: batch.send_id, poll_log_id: pollLogId, batch_id: batch.batch_id, step: "touch", ok: false, ms: 0, error: touchError instanceof Error ? touchError.message : String(touchError) });
+      }
+      outcome = { status: "provider_error", abortRun: false, error: `provider_error:${batch.batch_id}:${message.slice(0, 200)}` };
+    }
     totals.status = worse(totals.status, outcome.status);
     if (outcome.error) totals.errors.push(outcome.error);
     if (outcome.abortRun) {
@@ -235,9 +267,13 @@ async function run(sql: Sql, pollLogId: number, windowHours: number): Promise<To
   return totals;
 }
 
-async function finish(sql: Sql, pollLogId: number, status: RunStatus | "failed", totals: Totals | null, error: string | null): Promise<void> {
+/**
+ * Close the run's poll_log row — compare-and-set on `status = 'running'`: a run that outlived the 10-minute reconcile
+ * window was already closed as failed / no_response and keeps that verdict (the row says what the operator saw).
+ */
+async function finish(sql: Sql, pollLogId: number, status: RunStatus | "failed", totals: Totals | null, error: string | null): Promise<boolean> {
   const text = error ? error.slice(0, ERROR_TEXT_MAX) : null;
-  await sql`
+  const rows = await sql<{ id: number }[]>`
     update internal.poll_log
        set status = ${status}::internal.poll_status,
            finished_at = now(),
@@ -246,7 +282,11 @@ async function finish(sql: Sql, pollLogId: number, status: RunStatus | "failed",
            inserted = ${totals?.inserted ?? null},
            duplicates = ${totals?.duplicates ?? null},
            error = ${text}
-     where id = ${pollLogId}`;
+     where id = ${pollLogId}
+       and status = 'running'
+     returning id`;
+  if (rows.length === 0) logStep({ fn: FN, send_id: null, poll_log_id: pollLogId, step: "finish", ok: false, ms: 0, reason: "already_closed", status });
+  return rows.length > 0;
 }
 
 async function handle(req: Request): Promise<Response> {
@@ -262,16 +302,19 @@ async function handle(req: Request): Promise<Response> {
   }
 
   // input
-  let body: { poll_log_id?: unknown; window_hours?: unknown };
+  let parsed: unknown;
   try {
-    body = (await req.json()) as { poll_log_id?: unknown; window_hours?: unknown };
+    parsed = await req.json();
   } catch {
     return fail(400, "invalid_input", "body must be JSON { poll_log_id, window_hours }");
   }
-  const pollLogId = typeof body.poll_log_id === "number" ? body.poll_log_id : Number(body.poll_log_id);
-  const windowHours = typeof body.window_hours === "number" ? body.window_hours : Number(body.window_hours);
-  if (!Number.isInteger(pollLogId) || pollLogId <= 0) return fail(400, "invalid_input", "poll_log_id must be a positive integer");
-  if (!Number.isInteger(windowHours) || windowHours <= 0 || windowHours > MAX_WINDOW_HOURS) return fail(400, "invalid_input", `window_hours must be an integer in 1..${MAX_WINDOW_HOURS}`);
+  // a plain object with two JSON numbers — `null`, an array, a primitive, `true` or "1e3" are all 400, never a 500
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return fail(400, "invalid_input", "body must be a JSON object { poll_log_id, window_hours }");
+  const body = parsed as { poll_log_id?: unknown; window_hours?: unknown };
+  const pollLogId = body.poll_log_id;
+  const windowHours = body.window_hours;
+  if (typeof pollLogId !== "number" || !Number.isInteger(pollLogId) || pollLogId <= 0) return fail(400, "invalid_input", "poll_log_id must be a positive integer");
+  if (typeof windowHours !== "number" || !Number.isInteger(windowHours) || windowHours <= 0 || windowHours > MAX_WINDOW_HOURS) return fail(400, "invalid_input", `window_hours must be an integer in 1..${MAX_WINDOW_HOURS}`);
   logStep({ fn: FN, send_id: null, poll_log_id: pollLogId, step: "auth", ok: true, ms: t(), window_hours: windowHours });
 
   const unset = [...missingProviderEnv(), ...missingDbEnv()];

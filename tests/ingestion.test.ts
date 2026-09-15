@@ -21,7 +21,10 @@ import { acquireTestLock, testStack } from "./setup";
  * `v_campaign_performance` row must equal a clean single-run ingest of the same twelve; a further run changes
  * nothing (`ok`, `inserted = 0`). Then the provider's mood: a 503 with a long Retry-After → `deferred`, the next run
  * `ok`; a short Retry-After is waited out inside one run; 401 → `auth_error`; 404 → `provider_error`; and `since`
- * never carries an event id. Everything the suite creates is deleted in `afterAll`. Skipped loudly when the function
+ * never carries an event id. The 6.3 review's drills are folded in below: the 10-page cap, a concurrent run skipping
+ * the locked batch, `cursor_contract_violation`, a malformed 2xx, 429 short / long, an exception inside the batch
+ * (caught per batch, `last_polled_at` bumped, the run goes on), and `finish()`'s compare-and-set against a row the
+ * reconcile job already closed. Everything the suite creates is deleted in `afterAll`. Skipped loudly when the function
  * is not served (fails under CI).
  */
 const LOCAL_DB_URL = "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
@@ -123,7 +126,7 @@ describe.skipIf(!configured)("poll-events: the messy stream lands once, in any o
   async function mockReads(): Promise<MockRead[]> {
     return (await (await fetch(`${MOCK_URL}/__mock/reads`)).json()) as MockRead[];
   }
-  async function program(overrides: { page_size?: number; shuffle?: boolean; duplicate_across_pages?: boolean; released?: number }): Promise<void> {
+  async function program(overrides: { page_size?: number; shuffle?: boolean; duplicate_across_pages?: boolean; released?: number; endless?: boolean }): Promise<void> {
     await mock(`/__mock/batches/${encodeURIComponent(batchId)}`, { events: programmedEvents(batchId, contactExternalIds), ...overrides });
   }
 
@@ -209,7 +212,7 @@ describe.skipIf(!configured)("poll-events: the messy stream lands once, in any o
 
   afterAll(async () => {
     try {
-      await mock("/__mock/config", { events_status: null, events_fail_next: 0, events_retry_after: 1 }).catch(() => undefined);
+      await mock("/__mock/config", { events_status: null, events_fail_next: 0, events_retry_after: 1, events_malformed_next: 0, events_null_cursor: false }).catch(() => undefined);
       if (!sql) return;
       try {
         if (sendId) {
@@ -235,6 +238,12 @@ describe.skipIf(!configured)("poll-events: the messy stream lands once, in any o
     expect((await poll(id, { "x-cron-secret": "wrong" })).status).toBe(401);
     const bad = await fetch(FUNCTIONS_URL, { method: "POST", headers: { "Content-Type": "application/json", apikey: stack!.key, "x-cron-secret": cronSecret! }, body: "{" });
     expect(bad.status).toBe(400);
+    // 6.3 review [L]: a JSON null / array / primitive body and coercible ids are 400 invalid_input, never a 500
+    for (const body of ["null", "[]", "42", '"x"', JSON.stringify({ poll_log_id: String(id), window_hours: 48 }), JSON.stringify({ poll_log_id: id, window_hours: "1e3" }), JSON.stringify({ poll_log_id: true, window_hours: 48 })]) {
+      const res = await fetch(FUNCTIONS_URL, { method: "POST", headers: { "Content-Type": "application/json", apikey: stack!.key, "x-cron-secret": cronSecret! }, body });
+      expect(res.status, body).toBe(400);
+      expect(((await res.json()) as { code?: string }).code, body).toBe("invalid_input");
+    }
     const [row] = await sql<{ status: string }[]>`select status::text as status from internal.poll_log where id = ${id}`;
     expect(row.status).toBe("requested"); // untouched by the refused calls
     await sql`update internal.poll_log set status = 'ok', finished_at = now() where id = ${id}`;
@@ -359,13 +368,169 @@ describe.skipIf(!configured)("poll-events: the messy stream lands once, in any o
     expect(deferred.log.error).toContain(`deferred:${batchId}`);
     expect(deferred.log.inserted).toBe(0);
     expect(deferred.log.finished_at).toBeTruthy();
-    const [batch] = await sql<{ next_cursor: string | null; last_ok_at: string | null }[]>`select next_cursor, last_ok_at from public.provider_batches where send_id = ${sendId}`;
+    const [batch] = await sql<{ next_cursor: string | null; last_ok_at: string | null; last_polled_at: string | null }[]>`select next_cursor, last_ok_at, last_polled_at from public.provider_batches where send_id = ${sendId}`;
     expect(batch.next_cursor).toBeNull();
     expect(batch.last_ok_at).toBeNull();
+    expect(batch.last_polled_at).toBeNull(); // untouched on purpose: the deferred batch heads the next run
+    expect(deferred.log.batches).toBe(1); // the batch was attempted, the run went on (only a 401 aborts it)
     const ok = await run();
     expect(ok.log.status).toBe("ok");
     expect(ok.log.inserted).toBe(12);
     expect(await snapshot()).toEqual(messy);
+  });
+
+  it("429: a short Retry-After is waited out (ok); a long one leaves THIS batch rate_limited and the run goes on — cursor and last_polled_at untouched", async () => {
+    await resetWorld();
+    await program({ page_size: 4, shuffle: false, duplicate_across_pages: false, released: 12 });
+    await mock("/__mock/config", { events_status: 429, events_fail_next: 1, events_retry_after: 1 });
+    const before = (await mockReads()).length;
+    const short = await run();
+    expect(short.log.status).toBe("ok");
+    expect(short.log.inserted).toBe(12);
+    const reads = (await mockReads()).slice(before);
+    expect(reads[0]).toMatchObject({ status: 429 });
+    expect(reads[1]).toMatchObject({ status: 200, since: reads[0].since });
+
+    await resetWorld();
+    await mock("/__mock/config", { events_status: 429, events_fail_next: 1, events_retry_after: 11 });
+    const long = await run();
+    expect(long.res.body.status).toBe("rate_limited");
+    expect(long.log.status).toBe("rate_limited");
+    expect(long.log.error).toBe(`rate_limited:${batchId}:retry_after_11s`);
+    expect(long.log.batches).toBe(1);
+    expect(long.log.inserted).toBe(0);
+    const [batch] = await sql<{ next_cursor: string | null; last_ok_at: string | null; last_polled_at: string | null }[]>`select next_cursor, last_ok_at, last_polled_at from public.provider_batches where send_id = ${sendId}`;
+    expect(batch).toEqual({ next_cursor: null, last_ok_at: null, last_polled_at: null });
+    const ok = await run();
+    expect(ok.log.status).toBe("ok");
+    expect(ok.log.inserted).toBe(12);
+  });
+
+  it("the page cap: an endless stream (a fresh cursor and one event per page, has_more forever) stops after 10 pages — ok, pages = 10", async () => {
+    await resetWorld();
+    await program({ endless: true, shuffle: false, duplicate_across_pages: false });
+    const before = (await mockReads()).length;
+    const { res, log } = await run();
+    expect(res.body).toMatchObject({ status: "ok", batches: 1, pages: 10 });
+    expect(log.pages).toBe(10);
+    expect(log.inserted).toBe(10); // ten distinct events, one per page
+    const reads = (await mockReads()).slice(before);
+    expect(reads).toHaveLength(10);
+    expect(reads.every((r) => r.status === 200 && r.has_more === true)).toBe(true);
+    const [batch] = await sql<{ next_cursor: string | null }[]>`select next_cursor from public.provider_batches where send_id = ${sendId}`;
+    expect(batch.next_cursor).toBeTruthy(); // the last page's cursor is kept: the next run resumes there
+    await program({ page_size: 4, shuffle: false, duplicate_across_pages: false, released: 12 }); // back to a closing stream
+  });
+
+  it("has_more = true with next_cursor = null → cursor_contract_violation: the page is ingested, provider_error for the batch, cursor columns and last_ok_at untouched, last_polled_at bumped", async () => {
+    await resetWorld();
+    await program({ page_size: 4, shuffle: false, duplicate_across_pages: false, released: 12 });
+    await mock("/__mock/config", { events_null_cursor: true });
+    const { res, log } = await run();
+    await mock("/__mock/config", { events_null_cursor: false });
+    expect(res.body.status).toBe("provider_error");
+    expect(log.status).toBe("provider_error");
+    expect(log.error).toBe(`cursor_contract_violation:${batchId}`);
+    expect(log.pages).toBe(1);
+    expect(log.inserted).toBe(4); // the first page landed before the violation was seen
+    const [batch] = await sql<{ next_cursor: string | null; last_event_id: string | null; last_ok_at: string | null; last_polled_at: string | null }[]>`select next_cursor, last_event_id, last_ok_at, last_polled_at from public.provider_batches where send_id = ${sendId}`;
+    expect(batch.next_cursor).toBeNull();
+    expect(batch.last_event_id).toBeNull();
+    expect(batch.last_ok_at).toBeNull(); // "reports last synced" must not advance on a run the page calls failed
+    expect(batch.last_polled_at).toBeTruthy(); // but it counted as a poll (round-robin)
+    const ok = await run();
+    expect(ok.log.status).toBe("ok");
+    expect(ok.log.inserted).toBe(8);
+  });
+
+  it("a malformed 2xx (200, not JSON) → provider_error for the batch, nothing written but last_polled_at; the next run is ok", async () => {
+    await resetWorld();
+    await mock("/__mock/config", { events_malformed_next: 1 });
+    const { log } = await run();
+    expect(log.status).toBe("provider_error");
+    expect(log.error).toMatch(new RegExp(`^provider_error:${batchId}:200`));
+    expect(log.inserted).toBe(0);
+    const [batch] = await sql<{ next_cursor: string | null; last_ok_at: string | null; last_polled_at: string | null }[]>`select next_cursor, last_ok_at, last_polled_at from public.provider_batches where send_id = ${sendId}`;
+    expect(batch.next_cursor).toBeNull();
+    expect(batch.last_ok_at).toBeNull();
+    expect(batch.last_polled_at).toBeTruthy();
+    const ok = await run();
+    expect(ok.log.status).toBe("ok");
+    expect(ok.log.inserted).toBe(12);
+  });
+
+  it("an exception inside the batch (ingest raising) is caught per batch: provider_error for it, last_polled_at bumped outside the rolled-back transaction, the run finishes — never `failed`", async () => {
+    await resetWorld();
+    // a fault only this send can hit: a BEFORE INSERT trigger on events that raises for its send_id (dropped in finally)
+    await sql.unsafe(`create or replace function public.tmp_ing_poison_${tag}() returns trigger language plpgsql as $$ begin raise exception 'poisoned page'; end $$`);
+    await sql.unsafe(`create trigger tmp_ing_poison_${tag} before insert on public.events for each row when (new.send_id = '${sendId}'::uuid) execute function public.tmp_ing_poison_${tag}()`);
+    try {
+      const { res, log } = await run();
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("provider_error");
+      expect(log.status).toBe("provider_error");
+      expect(log.error).toContain(`provider_error:${batchId}:PostgresError: poisoned page`);
+      expect(log.finished_at).toBeTruthy();
+      expect(log.batches).toBe(1);
+      expect(log.inserted).toBe(0);
+      const [batch] = await sql<{ next_cursor: string | null; last_ok_at: string | null; last_polled_at: string | null }[]>`select next_cursor, last_ok_at, last_polled_at from public.provider_batches where send_id = ${sendId}`;
+      expect(batch.next_cursor).toBeNull();
+      expect(batch.last_ok_at).toBeNull();
+      expect(batch.last_polled_at).toBeTruthy(); // bumped outside the transaction: the batch does not head every run
+      const [{ n }] = await sql<{ n: number }[]>`select count(*)::int as n from public.events where send_id = ${sendId}`;
+      expect(n).toBe(0);
+    } finally {
+      await sql.unsafe(`drop trigger if exists tmp_ing_poison_${tag} on public.events`);
+      await sql.unsafe(`drop function if exists public.tmp_ing_poison_${tag}()`);
+    }
+    const ok = await run();
+    expect(ok.log.status).toBe("ok");
+    expect(ok.log.inserted).toBe(12);
+  });
+
+  it("two concurrent runs: the second skips the batch the first holds (batches 0, ok); both finish; nothing is ingested twice", async () => {
+    await resetWorld();
+    // the first run sleeps 3 s on a 503 while holding the batch's advisory lock; the second arrives 500 ms later
+    await mock("/__mock/config", { events_status: 503, events_fail_next: 1, events_retry_after: 3 });
+    const idA = await requestPollLog();
+    const idB = await requestPollLog();
+    const a = poll(idA);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const b = poll(idB);
+    const [resA, resB] = await Promise.all([a, b]);
+    expect(resA.status).toBe(200);
+    expect(resB.status).toBe(200);
+    expect([resA.body.batches, resB.body.batches].sort()).toEqual([0, 1]);
+    expect([resA.body.status, resB.body.status]).toEqual(["ok", "ok"]);
+    const logs = await sql<PollLogRow[]>`select id, status::text as status, finished_at, batches, pages, inserted, duplicates, error from internal.poll_log where id in (${idA}, ${idB}) order by id`;
+    expect(logs.every((l) => l.status === "ok" && l.finished_at !== null)).toBe(true);
+    expect(logs.map((l) => l.inserted).sort()).toEqual([0, 12]);
+    const [{ n }] = await sql<{ n: number }[]>`select count(*)::int as n from public.events where send_id = ${sendId}`;
+    expect(n).toBe(12);
+  });
+
+  it("finish() is compare-and-set: a row poll-log-reconcile closed as failed / no_response while the run was still going keeps that verdict", async () => {
+    await resetWorld();
+    await mock("/__mock/config", { events_status: 503, events_fail_next: 1, events_retry_after: 3 });
+    const id = await requestPollLog();
+    const running = poll(id);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    const [claimed] = await sql<{ status: string }[]>`select status::text as status from internal.poll_log where id = ${id}`;
+    expect(claimed.status).toBe("running");
+    await sql`update internal.poll_log set status = 'failed', finished_at = now(), error = 'no_response' where id = ${id}`; // the reconcile job's verdict
+    const res = await running;
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("ok"); // the function's own result is still reported to pg_net
+    const [log] = await sql<PollLogRow[]>`select id, status::text as status, finished_at, batches, pages, inserted, duplicates, error from internal.poll_log where id = ${id}`;
+    expect(log.status).toBe("failed");
+    expect(log.error).toBe("no_response"); // not overwritten
+    expect(log.batches).toBeNull();
+    // the ingest itself happened: the batch landed, and the next run is a clean ok / 0
+    const [{ n }] = await sql<{ n: number }[]>`select count(*)::int as n from public.events where send_id = ${sendId}`;
+    expect(n).toBe(12);
+    const again = await run();
+    expect(again.log.status).toBe("ok");
+    expect(again.log.inserted).toBe(0);
   });
 
   it("401 → auth_error (run aborted), 404 → provider_error (batch skipped, run continues); neither touches the cursor", async () => {

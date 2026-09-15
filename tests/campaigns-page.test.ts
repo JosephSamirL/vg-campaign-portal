@@ -338,20 +338,41 @@ describe("/campaigns", () => {
     expect(html).not.toContain("sync-status-alert");
   });
 
-  it("keeps the placeholder while the view has no row, and stays quiet for requested / running runs", async () => {
+  it("keeps the placeholder while the view has no row, and stays quiet for requested / running / deferred runs", async () => {
     responses.v_campaign_performance = { data: [kil16], error: null };
-    for (const status of ["requested", "running"]) {
-      responses["rpc:last_poll_status"] = { data: [{ status, finished_at: null }], error: null };
+    for (const status of ["requested", "running", "deferred"]) {
+      responses["rpc:last_poll_status"] = { data: [{ status, finished_at: null, requested_at: new Date(Date.now() - 60_000).toISOString() }], error: null };
       const html = await renderList();
       expect(html).toContain("Reports last synced: no portal sends yet");
+      expect(html).not.toContain("not synced yet");
       expect(html).not.toContain("last-synced-warning");
     }
+  });
+
+  it("6.3 review [M]: a v_last_sync row with a null last_ok_at reads 'Reports not synced yet' (a batch exists, no page landed) — not the no-row placeholder", async () => {
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses.v_last_sync = { data: { brand_id: "b", last_ok_at: null }, error: null };
+    responses["rpc:last_poll_status"] = { data: [{ status: "ok", finished_at: new Date(Date.now() - 60_000).toISOString() }], error: null };
+    const html = await renderList();
+    expect(html).toContain('data-testid="last-synced-pending">Reports not synced yet');
+    expect(html).not.toContain("no portal sends yet");
+    expect(html).not.toContain("last-synced-warning");
+  });
+
+  it("6.3 review [M]: a poller that stopped is visible — a newest row older than 20 min warns 'Report sync has not run since …' even when it is ok", async () => {
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses.v_last_sync = { data: { brand_id: "b", last_ok_at: "2026-09-15T11:57:00Z" }, error: null };
+    responses["rpc:last_poll_status"] = { data: [{ status: "ok", finished_at: "2026-09-15T12:05:00Z", requested_at: "2026-09-15T12:04:50Z" }], error: null };
+    const html = await renderList();
+    expect(html).toContain('data-testid="last-synced-warning">Report sync has not run since 15 Sep 2026, 12:05 UTC</p>');
+    expect(html).toContain("Reports last synced <time"); // the last success still shows
+    expect(html).not.toContain("sync-status-alert");
   });
 
   it("shows the muted warning (not the destructive alert) when the newest poll run is failed / auth_error / … — with the last success, or 'the portal went live'", async () => {
     responses.v_campaign_performance = { data: [kil16], error: null };
     responses.v_last_sync = { data: { brand_id: "b", last_ok_at: "2026-09-15T11:57:00Z" }, error: null };
-    responses["rpc:last_poll_status"] = { data: [{ status: "provider_error", finished_at: "2026-09-15T12:05:00Z" }], error: null };
+    responses["rpc:last_poll_status"] = { data: [{ status: "provider_error", finished_at: "2026-09-15T12:05:00Z" }], error: null }; // a stale row too: the failure message wins
     const html = await renderList();
     expect(html).toContain('<p class="text-muted-foreground" data-testid="last-synced-warning">Report sync has not succeeded since 15 Sep 2026, 11:57 UTC</p>');
     expect(html).not.toContain("sync-status-alert");
@@ -706,7 +727,7 @@ describe("/campaigns/[id]", () => {
     responses.campaigns = { data: campaignRow, error: null };
     responses.v_campaign_performance = { data: [kil16], error: null };
     responses.v_last_sync = { data: { brand_id: "b", last_ok_at: "2026-09-15T11:57:00Z" }, error: null };
-    responses["rpc:last_poll_status"] = { data: [{ status: "deferred", finished_at: "2026-09-15T12:05:00Z" }], error: null };
+    responses["rpc:last_poll_status"] = { data: [{ status: "provider_error", finished_at: "2026-09-15T12:05:00Z" }], error: null };
     const html = await renderDetail(KIL_0016);
     expect(html.indexOf('data-testid="campaign-header"')).toBeLessThan(html.indexOf('data-testid="last-synced"'));
     expect(html.indexOf('data-testid="last-synced"')).toBeLessThan(html.indexOf("Reported by the source"));
@@ -721,6 +742,16 @@ describe("/campaigns/[id]", () => {
     expect(failed).toContain("Sync status unavailable");
     expect(failed).not.toContain("Reports last synced");
     expect(failed).toContain("119.16%");
+
+    // 6.3 review [M]: a row with a null last_ok_at → "Reports not synced yet"; a stale ok row → "has not run since"
+    responses.campaigns = { data: campaignRow, error: null };
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses.v_last_sync = { data: { brand_id: "b", last_ok_at: null }, error: null };
+    responses["rpc:last_poll_status"] = { data: [{ status: "ok", finished_at: "2026-09-15T12:05:00Z", requested_at: "2026-09-15T12:04:50Z" }], error: null };
+    const pending = await renderDetail(KIL_0016);
+    expect(pending).toContain('data-testid="last-synced-pending">Reports not synced yet');
+    expect(pending).not.toContain("no portal sends yet");
+    expect(pending).toContain("Report sync has not run since 15 Sep 2026, 12:05 UTC");
   });
 
   it("gives each reporting | complete | partial portal send its live figures from the view row with send_id = send.id; no events → 'No reports yet', never zeros; confirmed / seed rows carry no block", async () => {
@@ -762,5 +793,34 @@ describe("/campaigns/[id]", () => {
     expect(seedBlock).not.toContain("send-live");
     // the figures section still shows the portal block per send (6.2) and the reported block first
     expect(html.indexOf("Reported by the source")).toBeLessThan(html.indexOf("Portal send live"));
+  });
+
+  it("6.3 review [L]: a partial with no batch_id gets no live block (outcome unknown, nothing was submitted); a failed view read says 'Figures unavailable', never 'No reports yet'", async () => {
+    responses.campaigns = { data: campaignRow, error: null };
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses.sends = {
+      data: [
+        { ...sendRow, id: "unknown", status: "partial", batch_id: null, accepted_count: null, rejected_count: null, dispatched_at: "2026-09-15T12:00:03Z", failure_reason: "dispatch_outcome_unknown_after_3_attempts" },
+        { ...sendRow, id: "reporting", status: "reporting", batch_id: "mock-9", accepted_count: 50064, rejected_count: 0, dispatched_at: "2026-09-15T12:00:03Z" },
+      ],
+      error: null,
+    };
+    const html = await renderDetail(KIL_0016);
+    const unknownBlock = html.slice(html.indexOf('data-send-id="unknown"'), html.indexOf('data-send-id="reporting"'));
+    expect(unknownBlock).toContain("provider outcome unknown");
+    expect(unknownBlock).not.toContain("send-live");
+    expect(unknownBlock).not.toContain("No reports yet");
+    const reportingBlock = html.slice(html.indexOf('data-send-id="reporting"'));
+    expect(reportingBlock).toContain('data-testid="send-live-empty"'); // the view loaded and has no row for it
+
+    responses.campaigns = { data: campaignRow, error: null };
+    responses.v_campaign_performance = { data: null, error: { message: "view timed out" } };
+    responses.sends = { data: [{ ...sendRow, id: "reporting", status: "reporting", batch_id: "mock-9", accepted_count: 50064, rejected_count: 0, dispatched_at: "2026-09-15T12:00:03Z" }], error: null };
+    const failed = await renderDetail(KIL_0016);
+    expect(failed).toContain("Figures could not be loaded");
+    const block = failed.slice(failed.indexOf('data-send-id="reporting"'));
+    expect(block).toContain('data-testid="send-live-unavailable"');
+    expect(block).toContain("Figures unavailable");
+    expect(block).not.toContain("No reports yet");
   });
 });

@@ -30,7 +30,11 @@ export type SendHistoryProps = {
   isOwner: boolean;
   /** Per-`source` badge text; the page passes `{ seed_send_log: "from send log" }` (Story 4.5). Unlisted sources carry no badge. */
   sourceLabels?: Partial<Record<SendRow["source"], string>>;
-  /** Story 6.3: live figures by `send_id` (the `portal` rows of `v_campaign_performance` + the rate rules), read by the page. */
+  /**
+   * Story 6.3: live figures by `send_id` (the `portal` rows of `v_campaign_performance` + the rate rules), read by the
+   * page. `undefined` means the page could not read them (the view / rules failed): every block then says "Figures
+   * unavailable" — a send missing from a loaded map is "No reports yet".
+   */
   live?: Record<string, LiveFigures>;
 };
 
@@ -100,7 +104,7 @@ export function SendHistory({ sends, isOwner, sourceLabels, live }: SendHistoryP
           const retry = stranded ? <DispatchRetryButton sendId={send.id} label={LEASE_EXPIRED_LABEL} /> : stuck ? <DispatchRetryButton sendId={send.id} /> : null;
           return (
             <li key={send.id}>
-              <SendStatus send={send} sourceLabel={sourceLabels?.[send.source] ?? null} retry={retry} live={live?.[send.id] ?? null} />
+              <SendStatus send={send} sourceLabel={sourceLabels?.[send.source] ?? null} retry={retry} live={live ? (live[send.id] ?? null) : undefined} />
             </li>
           );
         })}

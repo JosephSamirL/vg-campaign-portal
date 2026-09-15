@@ -74,9 +74,12 @@ export default async function CampaignPage({ params }: { params: Promise<{ id: s
 
   const isOwner = me?.role === "owner";
 
-  // Story 6.3: the live figures per portal send, from the view rows already loaded (the page re-runs on every poll tick)
-  const live: Record<string, LiveFigures> = {};
+  // Story 6.3: the live figures per portal send, from the view rows already loaded (the page re-runs on every poll
+  // tick). When the view or the rules failed to load, `live` is undefined and every block says "Figures unavailable"
+  // — never "No reports yet" for figures the page could not read (6.3 review [L]).
+  let live: Record<string, LiveFigures> | undefined;
   if (perf.ok && rules.ok) {
+    live = {};
     for (const row of perf.data) if (row.source === "portal" && row.send_id) live[row.send_id] = { row, rules: rules.data };
   }
 
@@ -86,7 +89,7 @@ export default async function CampaignPage({ params }: { params: Promise<{ id: s
       {!sync.ok || !pollStatus.ok ? (
         <SyncStatusAlert message={!sync.ok ? sync.message : !pollStatus.ok ? pollStatus.message : ""} />
       ) : (
-        <LastSynced last_ok_at={sync.data?.last_ok_at ?? null} warning={syncWarning(pollStatus.data?.status, sync.data?.last_ok_at)} />
+        <LastSynced last_ok_at={sync.data?.last_ok_at ?? null} has_batches={sync.data !== null} warning={syncWarning(pollStatus.data, sync.data?.last_ok_at)} />
       )}
       <Separator />
 

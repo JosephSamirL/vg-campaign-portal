@@ -158,8 +158,15 @@ export async function getCampaignShareLinks(supabase: Supabase, campaignId: stri
 export type LastSyncRow = Database["public"]["Views"]["v_last_sync"]["Row"];
 export type PollStatusRow = Database["public"]["Functions"]["last_poll_status"]["Returns"][number];
 
-/** Poll statuses that are not a failure: the newest run succeeded, or is still on its way. */
-export const HEALTHY_POLL_STATUSES: ReadonlySet<string> = new Set(["ok", "requested", "running"]);
+/**
+ * Poll statuses that are not a failure: the newest run succeeded, is still on its way, or was `deferred` — the
+ * provider asked it to come back later (a 503 with a Retry-After the run could not wait out; probe row e calls that
+ * "not an error", and 6.3's review [M] moved it here, amending S11).
+ */
+export const HEALTHY_POLL_STATUSES: ReadonlySet<string> = new Set(["ok", "requested", "running", "deferred"]);
+
+/** A poller that has not run for this long has stopped, whatever its last status said (the jobs fire every 5 min). */
+export const STALE_POLL_AFTER_MS = 20 * 60_000;
 
 /**
  * The brand's "reports last synced" instant: one `v_last_sync` row per brand through RLS (`.maybeSingle()` — no
@@ -178,14 +185,29 @@ export async function getLastPollStatus(supabase: Supabase): Promise<Result<Poll
   return { ok: true, data: data?.[0] ?? null };
 }
 
+/** What `syncWarning` needs of the newest poll run: `last_poll_status()`'s row (requested_at from 0015 on). */
+export type PollRun = { status: string; finished_at?: string | null; requested_at?: string | null };
+
 /**
- * AC5's muted line: when the newest run's status is outside {ok, requested, running} — failed, auth_error,
- * rate_limited, provider_error, deferred — "Report sync has not succeeded since {last_ok_at | 'the portal went
- * live'}". No run at all (null) is not a failure: nothing has been requested yet.
+ * AC5's muted line, two causes (6.3 review [M]: "a poller that isn't running is visible, not silent"):
+ *   - the newest run's status is outside {ok, requested, running, deferred} — failed, auth_error, rate_limited,
+ *     provider_error — "Report sync has not succeeded since {last_ok_at | 'the portal went live'}";
+ *   - the newest run is older than 20 minutes (its finished_at, else requested_at — the jobs fire every 5 min, so a
+ *     stale `ok` means pg_cron / pg_net stopped, the project was paused, …) — "Report sync has not run since {then}".
+ * No run at all (null) is not a failure: nothing has been requested yet. A row with neither timestamp cannot be
+ * aged and is judged on its status alone.
  */
-export function syncWarning(status: string | null | undefined, lastOkAt: string | null | undefined): string | null {
-  if (status == null || HEALTHY_POLL_STATUSES.has(status)) return null;
-  return `Report sync has not succeeded since ${lastOkAt ? formatDateTime(lastOkAt) : "the portal went live"}`;
+export function syncWarning(poll: PollRun | null | undefined, lastOkAt: string | null | undefined, now: Date = new Date()): string | null {
+  if (poll == null) return null;
+  if (!HEALTHY_POLL_STATUSES.has(poll.status)) {
+    return `Report sync has not succeeded since ${lastOkAt ? formatDateTime(lastOkAt) : "the portal went live"}`;
+  }
+  const ranAt = poll.finished_at ?? poll.requested_at ?? null;
+  if (ranAt) {
+    const at = Date.parse(ranAt);
+    if (Number.isFinite(at) && now.getTime() - at > STALE_POLL_AFTER_MS) return `Report sync has not run since ${formatDateTime(ranAt)}`;
+  }
+  return null;
 }
 
 /**

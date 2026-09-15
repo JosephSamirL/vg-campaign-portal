@@ -47,7 +47,11 @@ export type SendStatusProps = {
   sourceLabel?: string | null;
   /** The owner-only Retry for a send stuck in `confirmed` (AC5); rendered where the history decides. */
   retry?: React.ReactNode;
-  /** Story 6.3: the live figures for a `reporting | complete | partial` send (null / absent → "No reports yet"). */
+  /**
+   * Story 6.3: the live figures for a `reporting | complete | partial` send with a `batch_id`. `null` (the page read the
+   * view and found no row / no event) → "No reports yet"; `undefined` (the page could not read the view) → "Figures
+   * unavailable" — never a fake empty state for figures nobody read (6.3 review [L]).
+   */
   live?: LiveFigures | null;
 };
 
@@ -63,11 +67,18 @@ const LIVE_COUNTS = [
  * The live-figures block (Story 6.3 AC5): what the provider has reported for this send so far, as the poller
  * ingested it — counts per type and the five rates as `v_campaign_performance` computed them, each captioned from
  * `metric_rules` (D-5: printed, never recomputed). A send with no report yet reads "No reports yet" — an empty
- * state, not a row of zeros. `dispatched_at` on the row is the moment the clock started; `reporting` sends keep
+ * state, not a row of zeros; figures the page could not read (`live` undefined) read "Figures unavailable". `dispatched_at` on the row is the moment the clock started; `reporting` sends keep
  * changing until `complete_sends()` closes them 24 h later.
  */
 export function SendLiveFigures({ live }: { live: LiveFigures | null | undefined }) {
-  if (!live || !hasLiveFigures(live.row)) {
+  if (live === undefined) {
+    return (
+      <p className="text-sm text-muted-foreground" data-testid="send-live-unavailable" role="status">
+        Figures unavailable
+      </p>
+    );
+  }
+  if (live === null || !hasLiveFigures(live.row)) {
     return (
       <p className="text-sm text-muted-foreground" data-testid="send-live-empty" role="status">
         No reports yet
@@ -140,8 +151,9 @@ export function failureReasonPrefix(reason: string): string {
  * the recipient count, `batch_id`, accepted / rejected. `partial` reads "Partially sent — {accepted}
  * of {count} accepted" when the provider answered, and "Partially sent — provider outcome unknown" when
  * `accepted_count` is null (a capped / expired dispatch: nothing is fabricated for an unknown, FR-19);
- * `failed` shows the `failure_reason` code. Story 6.3: a portal send in `reporting | complete | partial`
- * carries the live-figures block (`live`, from `v_campaign_performance`) or "No reports yet". Pure display of
+ * `failed` shows the `failure_reason` code. Story 6.3: a portal send in `reporting | complete | partial` that
+ * carries a `batch_id` gets the live-figures block (`live`, from `v_campaign_performance`), "No reports yet", or
+ * "Figures unavailable" when the page could not read the view; a partial with no `batch_id` gets none. Pure display of
  * the `sends` row (RLS) — the app never updates a send; status changes arrive through polling (SendHistory).
  */
 export function SendStatus({ send, sourceLabel, retry, live }: SendStatusProps) {
@@ -186,7 +198,8 @@ export function SendStatus({ send, sourceLabel, retry, live }: SendStatusProps) 
         </p>
       )}
 
-      {send.source === "portal" && REPORTING_STATUSES.has(send.status) && <SendLiveFigures live={live} />}
+      {/* only a send the provider answered (batch_id) can have reports: an unknown-outcome partial says so above, never "No reports yet" */}
+      {send.source === "portal" && REPORTING_STATUSES.has(send.status) && send.batch_id !== null && <SendLiveFigures live={live} />}
 
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
         <dt className="text-muted-foreground">Confirmed</dt>

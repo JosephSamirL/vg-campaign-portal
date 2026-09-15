@@ -332,8 +332,8 @@ select is((select count(*) from public.v_last_sync where brand_id = pg_temp.bran
 select is((select count(*) from public.v_campaign_performance where campaign_id = '00000000-0000-4000-8000-0000000000ca'), 2::bigint, 'V1 campaign KA: the reported row + one portal row for SA');
 select is((select row(source, send_id, sent, delivered, bounced, opens, clicks, unsubscribes, delivered_rate, bounce_rate, open_rate, click_rate, unsubscribe_rate, dispatched_at)::text
            from public.v_campaign_performance where campaign_id = '00000000-0000-4000-8000-0000000000ca' and source = 'portal'),
-  row('portal', '00000000-0000-4000-8000-0000000000aa'::uuid, 6, 7, 3, 4, 1, 1::bigint, 116.67::numeric, 50.00::numeric, 66.67::numeric, 16.67::numeric, 16.67::numeric, (select dispatched_at from public.sends where id = '00000000-0000-4000-8000-0000000000aa'))::text,
-  'V2 SA: sent = accepted_count 6; delivered 7 distinct (C1 C2 C3 C4 C6 + 2 key-less by id — C2 delivered twice counts once), bounced 3 (C2 C5 C6), opens 4 total, clicks 1, unsubscribes 1; rates over sent, > 100 never clamped');
+  row('portal', '00000000-0000-4000-8000-0000000000aa'::uuid, 6, 5, 3, 4, 1, 1::bigint, 83.33::numeric, 50.00::numeric, 66.67::numeric, 16.67::numeric, 16.67::numeric, (select dispatched_at from public.sends where id = '00000000-0000-4000-8000-0000000000aa'))::text,
+  'V2 SA: sent = accepted_count 6; delivered 5 distinct contacts (C1 C2 C3 C4 C6 — C2 delivered twice counts once, the 2 key-less deliveries count nobody: 0015), bounced 3 (C2 C5 C6), opens 4 total, clicks 1, unsubscribes 1; rates over sent');
 select is((select row(source, send_id, sent, delivered, unsubscribes, unsubscribe_rate, dispatched_at)::text from public.v_campaign_performance where campaign_id = '00000000-0000-4000-8000-0000000000ca' and source = 'reported'),
   row('reported', null::uuid, null::int, null::int, null::bigint, null::numeric, null::timestamptz)::text, 'V3 the reported row is unchanged: send_id / dispatched_at null');
 select is((select row(sent, delivered, bounced, opens, clicks, unsubscribes, delivered_rate)::text from public.v_campaign_performance where send_id = '00000000-0000-4000-8000-0000000000ad'),
@@ -372,7 +372,7 @@ insert into public.sends (id, brand_id, campaign_id, status, source, recipient_c
   ('00000000-0000-4000-8000-00000000e001', pg_temp.brand('INGEST-B'), '00000000-0000-4000-8000-00000000d101', 'dispatched', 'portal', 1, 'o@x.test', now() - interval '3 min', now() - interval '2 min', 1, now() + interval '8 min', null),
   -- d2 dispatched 25 h ago, lease expired, 1 attempt, no batch    → sweep: dispatch_expired
   ('00000000-0000-4000-8000-00000000e002', pg_temp.brand('INGEST-B'), '00000000-0000-4000-8000-00000000d102', 'dispatched', 'portal', 1, 'o@x.test', now() - interval '26 hours', now() - interval '25 hours', 1, now() - interval '24 hours', null),
-  -- d3 confirmed 25 h ago, never leased                           → sweep: dispatch_expired (never POSTed a day later)
+  -- d3 confirmed 25 h ago, never leased                           → sweep: FAILED dispatch_expired (never POSTed a day later — 0015: nothing to be partial about)
   ('00000000-0000-4000-8000-00000000e003', pg_temp.brand('INGEST-B'), '00000000-0000-4000-8000-00000000d103', 'confirmed',  'portal', 1, 'o@x.test', now() - interval '25 hours', null, 0, null, null),
   -- d4 dispatched 40 min ago, 3 attempts, lease expired           → sweep: dispatch_outcome_unknown_after_3_attempts
   ('00000000-0000-4000-8000-00000000e004', pg_temp.brand('INGEST-B'), '00000000-0000-4000-8000-00000000d104', 'dispatched', 'portal', 1, 'o@x.test', now() - interval '40 min', now() - interval '39 min', 3, now() - interval '1 min', null),
@@ -401,12 +401,12 @@ select results_eq(
   $$ select id::text, status::text, failure_reason, dispatch_attempts from public.sends where brand_id = (select id from public.brands where code = 'INGEST-B') and id::text like '00000000-0000-4000-8000-00000000e00%' order by id $$,
   $$ values ('00000000-0000-4000-8000-00000000e001', 'partial', 'provider_503_outcome_unknown', 1),
             ('00000000-0000-4000-8000-00000000e002', 'partial', 'dispatch_expired', 1),
-            ('00000000-0000-4000-8000-00000000e003', 'partial', 'dispatch_expired', 0),
+            ('00000000-0000-4000-8000-00000000e003', 'failed', 'dispatch_expired', 0),
             ('00000000-0000-4000-8000-00000000e004', 'partial', 'dispatch_outcome_unknown_after_3_attempts', 3),
             ('00000000-0000-4000-8000-00000000e005', 'dispatched', null, 2),
             ('00000000-0000-4000-8000-00000000e006', 'dispatched', null, 1),
             ('00000000-0000-4000-8000-00000000e007', 'dispatched', null, 1) $$,
-  'D5 the sweep: d2 / d3 expired (24 h ceiling, confirmed_at when never leased), d4 capped with its reason, d5 (live lease) and the young sends untouched');
+  'D5 the sweep: d2 expired → partial, d3 never leased → failed (24 h ceiling, confirmed_at when never leased; 0015), d4 capped with its reason, d5 (live lease) and the young sends untouched');
 select ok((select bool_and(provider_responded_at is null and batch_id is null) from public.sends where id in ('00000000-0000-4000-8000-00000000e002', '00000000-0000-4000-8000-00000000e003', '00000000-0000-4000-8000-00000000e004')), 'D5 ... nothing invented: batch_id / provider_responded_at null');
 
 -- the batch_id collision inside dispatch_record_result

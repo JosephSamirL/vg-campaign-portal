@@ -1179,6 +1179,7 @@ export type Database = {
         Args: never
         Returns: {
           finished_at: string
+          requested_at: string
           status: string
         }[]
       }

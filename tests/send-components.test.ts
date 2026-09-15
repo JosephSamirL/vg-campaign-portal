@@ -155,6 +155,16 @@ describe("SendStatus", () => {
     const confirmed = renderToStaticMarkup(createElement(SendStatus, { send: { ...base, status: "confirmed" }, live: { row, rules } }));
     expect(confirmed).not.toContain("send-live");
     expect(confirmed).not.toContain("No reports yet");
+    // 6.3 review [L]: `undefined` = the page could not read the view → "Figures unavailable", never the empty state
+    const unavailable = renderToStaticMarkup(createElement(SendStatus, { send: reporting, live: undefined }));
+    expect(unavailable).toContain('data-testid="send-live-unavailable"');
+    expect(unavailable).toContain("Figures unavailable");
+    expect(unavailable).not.toContain("No reports yet");
+    // ... and a partial with no batch_id (outcome unknown — nothing was submitted) gets no block at all
+    const unknown = renderToStaticMarkup(createElement(SendStatus, { send: { ...base, status: "partial", batch_id: null, accepted_count: null, failure_reason: "dispatch_expired" }, live: null }));
+    expect(unknown).toContain("provider outcome unknown");
+    expect(unknown).not.toContain("send-live");
+    expect(unknown).not.toContain("No reports yet");
   });
 
   it("partial reads 'Partially sent — {accepted} of {count} accepted'", () => {
