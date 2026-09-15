@@ -1,4 +1,4 @@
-import { isRpcCode, rpcMessage, type RpcCode } from "@/lib/rpc-codes";
+import { isRpcCode, rpcMessage, type RpcCode, type RpcContext } from "@/lib/rpc-codes";
 
 /**
  * Every server action returns this shape (architecture "Format patterns"): expected
@@ -17,9 +17,9 @@ export type ActionResult<T = void> =
 type RpcError = { code?: string; message: string; hint?: string | null };
 type RpcResponse = { data: unknown; error: RpcError | null };
 
-/** `{ ok: false, code, message }` for an expected code, copy from `lib/rpc-codes.ts`. */
-export function fail(code: RpcCode, hint?: string | null): ActionResult<never> {
-  const message = rpcMessage(code, hint);
+/** `{ ok: false, code, message }` for an expected code, copy from `lib/rpc-codes.ts` (per surface — Story 5.2's `"share"`). */
+export function fail(code: RpcCode, hint?: string | null, context?: RpcContext): ActionResult<never> {
+  const message = rpcMessage(code, hint, context);
   return hint != null && hint !== "" ? { ok: false, code, message, hint } : { ok: false, code, message };
 }
 
@@ -31,10 +31,10 @@ export function fail(code: RpcCode, hint?: string | null): ActionResult<never> {
  *     message) → throws, so the route's `error.tsx` renders. Expected failures are the only
  *     thing the UI switches on; the raw text of an unexpected one stays in the server log.
  */
-export async function wrapRpc<R extends RpcResponse>(query: PromiseLike<R>): Promise<ActionResult<NonNullable<R["data"]>>> {
+export async function wrapRpc<R extends RpcResponse>(query: PromiseLike<R>, context?: RpcContext): Promise<ActionResult<NonNullable<R["data"]>>> {
   const { data, error } = await query;
   if (error) {
-    if (error.code === "P0001" && isRpcCode(error.message)) return fail(error.message, error.hint);
+    if (error.code === "P0001" && isRpcCode(error.message)) return fail(error.message, error.hint, context);
     throw new Error(`rpc failed: ${error.code ?? "?"} ${error.message}`);
   }
   // supabase-js types `data` as nullable on every response; with `error` null it is the row (`.single()` errors on no row)

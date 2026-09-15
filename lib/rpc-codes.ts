@@ -6,8 +6,8 @@ import { formatInt } from "@/lib/format";
  * (lib/actions.ts `wrapRpc`) and the UI switches on `code` for its inline <Alert>; anything
  * outside the list is unexpected and reaches the route's `error.tsx`.
  *
- * `share_denied` / `rate_limited` are reserved for Epic 5 (S1: `get_shared_results` returns
- * them as a status column rather than raising).
+ * `share_denied` / `rate_limited` belong to Epic 5 (S1: `get_shared_results` returns them as a
+ * status column rather than raising; Story 5.3 maps `status <> 'ok'` to `{ ok: false, code }`).
  */
 export const RPC_CODES = [
   "not_owner",
@@ -40,9 +40,21 @@ const COPY: Record<RpcCode, string> = {
   rate_limited: "Too many attempts — wait a minute and try again.",
 };
 
+/**
+ * Which surface raised the code: the same `not_owner` reads "can send" beside the Send button and
+ * "can publish or revoke share links" in the share dialog (Story 5.2). `send` is the default so
+ * every Story 4.4 call site keeps its sentence; only the copy differs, never the code.
+ */
+export type RpcContext = "send" | "share";
+
+const SHARE_COPY: Partial<Record<RpcCode, string>> = {
+  not_owner: "Only the brand owner can publish or revoke share links.",
+  invalid_input: "The password needs at least 8 characters and the expiry must be in the future.",
+};
+
 /** The copy for a code; a numeric hint is formatted with thousands separators, any other hint verbatim. */
-export function rpcMessage(code: RpcCode, hint?: string | null): string {
-  const text = COPY[code];
+export function rpcMessage(code: RpcCode, hint?: string | null, context: RpcContext = "send"): string {
+  const text = (context === "share" ? SHARE_COPY[code] : undefined) ?? COPY[code];
   if (!text.includes("{hint}")) return text;
   const trimmed = hint?.trim() ?? "";
   const shown = trimmed === "" ? "a different count" : /^\d+$/.test(trimmed) ? formatInt(Number(trimmed)) : trimmed;

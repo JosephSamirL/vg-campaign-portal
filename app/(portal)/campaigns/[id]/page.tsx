@@ -1,16 +1,16 @@
 import { notFound } from "next/navigation";
 import { z } from "zod";
-import { PublishPlaceholder } from "@/components/campaigns/action-placeholders";
 import { CampaignFigures } from "@/components/campaigns/campaign-figures";
 import { CampaignHeader } from "@/components/campaigns/campaign-header";
 import { CampaignSection } from "@/components/campaigns/campaign-section";
 import { SendHistory } from "@/components/campaigns/send-history";
-import { EmptyState } from "@/components/layout/empty-state";
 import { RetryAlert } from "@/components/layout/retry-alert";
 import { SendConfirmDialog } from "@/components/send/send-confirm-dialog";
+import { ShareLinkForm } from "@/components/share/share-link-form";
+import { ShareLinkList } from "@/components/share/share-link-list";
 import { Separator } from "@/components/ui/separator";
 import { getCurrentAppUser } from "@/lib/current-user";
-import { getCampaign, getCampaignPerformance, getCampaignSends, getRateRules } from "@/lib/queries/campaigns";
+import { getCampaign, getCampaignPerformance, getCampaignSends, getCampaignShareLinks, getRateRules } from "@/lib/queries/campaigns";
 import { createClient } from "@/lib/supabase/server";
 
 // Brand data under a cookie session is never cached across users: the (portal) layout opts
@@ -23,7 +23,8 @@ const idSchema = z.uuid();
 /**
  * `/campaigns/[id]` — one campaign with its reported figures, its sends (Story 4.4: the Send
  * button + confirm dialog for an owner, the history with its status poll for everyone; 4.5 adds
- * the seed send-log rows) and the Share-links slot (5.2). The id is validated before any query;
+ * the seed send-log rows) and the share links (Story 5.2: "Publish results" + the once-shown URL
+ * for an owner, the `v_share_links` rows with Revoke for everyone / owner). The id is validated before any query;
  * a row RLS does not return (another brand's, or nobody's) is `null` → `notFound()` → the route's
  * `not-found.tsx` (D-2: "no row", never an error). The owner-only controls are gated on the
  * server-side session role (Story 1.5's helper), never on anything from the client — and the
@@ -34,11 +35,12 @@ export default async function CampaignPage({ params }: { params: Promise<{ id: s
   if (!idSchema.safeParse(id).success) notFound();
 
   const supabase = await createClient();
-  const [campaign, perf, rules, sends, me] = await Promise.all([
+  const [campaign, perf, rules, sends, links, me] = await Promise.all([
     getCampaign(supabase, id),
     getCampaignPerformance(supabase, id),
     getRateRules(supabase),
     getCampaignSends(supabase, id),
+    getCampaignShareLinks(supabase, id),
     getCurrentAppUser(),
   ]);
 
@@ -79,8 +81,16 @@ export default async function CampaignPage({ params }: { params: Promise<{ id: s
         )}
       </CampaignSection>
 
-      <CampaignSection id="share-links" title="Share links" action={isOwner ? <PublishPlaceholder /> : null}>
-        <EmptyState title="No share links yet" description="Password-protected result links will be listed here." />
+      <CampaignSection
+        id="share-links"
+        title="Share links"
+        action={isOwner ? <ShareLinkForm campaignId={campaign.data.id} campaignLabel={campaign.data.name ?? campaign.data.external_id} /> : null}
+      >
+        {!links.ok ? (
+          <RetryAlert title="Share links could not be loaded" message={links.message} />
+        ) : (
+          <ShareLinkList links={links.data} isOwner={isOwner} />
+        )}
       </CampaignSection>
     </div>
   );

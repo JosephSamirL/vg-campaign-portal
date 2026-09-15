@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { headers } from "next/headers";
 import { z } from "zod";
 import { fail, wrapRpc, type ActionResult } from "@/lib/actions";
 import type { Database, Tables } from "@/lib/database.types";
@@ -8,7 +9,7 @@ import { isRpcCode } from "@/lib/rpc-codes";
 import { createClient } from "@/lib/supabase/server";
 
 /*
- * Server actions for `/campaigns/[id]` (Story 4.4; Epic 5 adds the share actions here).
+ * Server actions for `/campaigns/[id]` (Story 4.4 sends; Story 5.2 share links at the end of the file).
  * Pattern (D-12): zod on the input → RPC through the cookie-session client → `wrapRpc` maps
  * the error contract → `revalidatePath` after every mutation. The actions hold no role check
  * of their own: the RPCs refuse (`not_owner`, `not_in_brand`, …) and the action only maps —
@@ -23,6 +24,13 @@ export type DispatchOutcome = { send_id: string; dispatched: boolean; reason: st
 const Preview = z.object({ campaign_id: z.uuid() });
 const Confirm = z.object({ campaign_id: z.uuid(), expected_count: z.number().int().positive() });
 const Dispatch = z.object({ send_id: z.uuid() });
+/**
+ * Story 5.2 / D-10: `password` is `min(8)` with NO `.trim()` and no transform — the RPC stores what
+ * was typed, and the stranger must later type the same thing, spaces included. `expires_at` is an
+ * ISO-8601 UTC instant (the browser converts its `datetime-local` value) or `null` — never `""`.
+ */
+const CreateShareLink = z.object({ campaign_id: z.uuid(), password: z.string().min(8), expires_at: z.iso.datetime().nullable() });
+const RevokeShareLink = z.uuid();
 
 type Supabase = Awaited<ReturnType<typeof createClient>>;
 
@@ -116,4 +124,68 @@ async function functionErrorBody(error: unknown): Promise<Record<string, unknown
   } catch {
     return null;
   }
+}
+
+/* ----------------------------------------------------------------------------------------------
+ * Story 5.2 — share links. Same pattern: zod → RPC through the cookie-session client → `wrapRpc`
+ * → `revalidatePath`. No role check here either: `create_share_link` / `revoke_share_link` raise
+ * `not_owner` for an analyst and the action only relays it (FR-4: UI hides, DB refuses).
+ * ---------------------------------------------------------------------------------------------- */
+
+/** The one and only time the raw token exists outside the RPC's return value: this response. */
+export type ShareLinkCreated = { token: string; url: string };
+
+/**
+ * `create_share_link(p_campaign_id, p_password, p_expires_at)` → the raw 43-char token (5.1 hashes
+ * it; it is never readable again) plus the full URL the owner hands out. Invalid input is refused
+ * here first (`invalid_input`, no RPC call) and again by the RPC. `p_expires_at` is omitted — not
+ * sent as `null` — so the RPC's `default null` applies. The token is never logged and never put in
+ * a portal URL, `revalidatePath` or a cookie.
+ */
+export async function createShareLinkAction(input: unknown): Promise<ActionResult<ShareLinkCreated>> {
+  const p = CreateShareLink.safeParse(input);
+  if (!p.success) return fail("invalid_input", null, "share");
+  const supabase = await createClient();
+  const res = await wrapRpc(
+    supabase.rpc("create_share_link", {
+      p_campaign_id: p.data.campaign_id,
+      p_password: p.data.password,
+      ...(p.data.expires_at === null ? {} : { p_expires_at: p.data.expires_at }),
+    }),
+    "share",
+  );
+  if (!res.ok) return res;
+  if (typeof res.data !== "string" || res.data.length === 0) throw new Error("create_share_link returned no token");
+  revalidatePath(`/campaigns/${p.data.campaign_id}`);
+  return { ok: true, data: { token: res.data, url: await shareUrl(res.data) } };
+}
+
+/**
+ * `revoke_share_link(p_id)` — sets `revoked_at` on an own-brand link (a second call is a no-op in
+ * the RPC). `not_owner` for an analyst, `not_in_brand` for an unknown / foreign id. The page is
+ * revalidated through the link's campaign, read back from `v_share_links` (RLS-scoped).
+ */
+export async function revokeShareLinkAction(id: unknown): Promise<ActionResult<{ id: string }>> {
+  const p = RevokeShareLink.safeParse(id);
+  if (!p.success) return fail("invalid_input", null, "share");
+  const supabase = await createClient();
+  const res = await wrapRpc(supabase.rpc("revoke_share_link", { p_id: p.data }), "share");
+  if (!res.ok) return res;
+  const { data: link } = await supabase.from("v_share_links").select("campaign_id").eq("id", p.data).maybeSingle();
+  if (link?.campaign_id) revalidatePath(`/campaigns/${link.campaign_id}`);
+  return { ok: true, data: { id: p.data } };
+}
+
+/**
+ * `https://<host>/share/<token>` from the request's own host (`x-forwarded-host` behind Vercel's
+ * proxy, else `host`) — no site-URL env var to drift from the deployment. `http` only for a local
+ * dev host; with no host header at all the path is root-relative and the browser prefixes its origin.
+ */
+async function shareUrl(token: string): Promise<string> {
+  const h = await headers();
+  const host = h.get("x-forwarded-host") ?? h.get("host");
+  const path = `/share/${token}`;
+  if (!host) return path;
+  const proto = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(host) ? "http" : "https";
+  return `${proto}://${host}${path}`;
 }

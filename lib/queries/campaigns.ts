@@ -21,6 +21,7 @@ export type { MetricRule, Result };
 export type PerformanceRow = Database["public"]["Views"]["v_campaign_performance"]["Row"];
 export type CampaignRow = Database["public"]["Tables"]["campaigns"]["Row"];
 export type SendRow = Database["public"]["Tables"]["sends"]["Row"];
+export type ShareLinkRow = Database["public"]["Views"]["v_share_links"]["Row"];
 
 /**
  * The generated view type is all-nullable (Postgres cannot prove view columns non-null).
@@ -112,6 +113,17 @@ export async function getRateRules(supabase: Supabase): Promise<Result<RateRules
  */
 export async function getCampaignSends(supabase: Supabase, campaignId: string): Promise<Result<SendRow[]>> {
   const { data, error } = await supabase.from("sends").select("*").eq("campaign_id", campaignId).order("created_at", { ascending: false });
+  if (error) return { ok: false, message: error.message };
+  return { ok: true, data: data ?? [] };
+}
+
+/**
+ * The campaign's share links, newest first (Story 5.2). `v_share_links` is the only read path
+ * for brand users (5.1: `security_invoker`, no hash columns, `status` computed in SQL) — the page
+ * renders the rows as read, and re-reads them after every publish / revoke through `revalidatePath`.
+ */
+export async function getCampaignShareLinks(supabase: Supabase, campaignId: string): Promise<Result<ShareLinkRow[]>> {
+  const { data, error } = await supabase.from("v_share_links").select("*").eq("campaign_id", campaignId).order("created_at", { ascending: false });
   if (error) return { ok: false, message: error.message };
   return { ok: true, data: data ?? [] };
 }

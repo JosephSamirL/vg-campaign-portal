@@ -46,6 +46,8 @@ vi.mock("@/app/(portal)/campaigns/[id]/actions", () => ({
   previewSendAction: vi.fn(),
   confirmSendAction: vi.fn(),
   dispatchSendAction: vi.fn(),
+  createShareLinkAction: vi.fn(),
+  revokeShareLinkAction: vi.fn(),
 }));
 
 let role: "owner" | "analyst" | null = "analyst";
@@ -177,7 +179,20 @@ beforeEach(() => {
   role = "analyst";
   responses.metric_rules = { data: rules, error: null };
   responses.sends = { data: [], error: null };
+  responses.v_share_links = { data: [], error: null };
 });
+
+/** A share link as `v_share_links` returns it (Story 5.2); tests override status / dates per case. */
+const shareLinkRow = {
+  id: "3f7a1b2c-9d8e-4f60-a1b2-c3d4e5f60718",
+  brand_id: "b",
+  campaign_id: KIL_0016,
+  created_by: "u",
+  created_at: "2026-09-15T09:51:00+00:00",
+  expires_at: null,
+  revoked_at: null,
+  status: "active",
+};
 
 describe("/campaigns", () => {
   it("renders a destructive alert with Retry (not a table, not zeros) when the view query fails", async () => {
@@ -330,16 +345,20 @@ describe("/campaigns/[id]", () => {
     expect(calls.sends).toEqual([["select", ["*"]], ["eq", ["campaign_id", KIL_0016]], ["order", ["created_at", { ascending: false }]]]);
     expect(html).toContain('id="sends"');
     expect(html).toContain("No sends yet");
+    // the share-links query is the story's exact shape (RLS through the security_invoker view, newest first)
+    expect(calls.v_share_links).toEqual([["select", ["*"]], ["eq", ["campaign_id", KIL_0016]], ["order", ["created_at", { ascending: false }]]]);
     expect(html).toContain('id="share-links"');
     expect(html).toContain("No share links yet");
-    // analyst: no Send button, no dialog, no Publish placeholder (Story 4.4 AC4: UI hides, DB refuses)
+    // analyst: no Send button, no dialog, no Publish button / dialog (Story 4.4 AC4, 5.2 AC5: UI hides, DB refuses)
     expect(html).not.toContain("send-button");
     expect(html).not.toContain("send-dialog");
+    expect(html).not.toContain("publish-button");
+    expect(html).not.toContain("share-link-dialog");
     expect(html).not.toContain("publish-placeholder");
     expect(html).not.toContain("Available soon");
   });
 
-  it("shows the Send button (+ closed confirm dialog) and the Publish placeholder to an owner (server-side role only)", async () => {
+  it("shows the Send button (+ closed confirm dialog) and the Publish button (+ closed share dialog) to an owner (server-side role only)", async () => {
     role = "owner";
     responses.campaigns = { data: campaignRow, error: null };
     responses.v_campaign_performance = { data: [kil16], error: null };
@@ -348,9 +367,57 @@ describe("/campaigns/[id]", () => {
     expect(html).not.toMatch(/<button[^>]*data-testid="send-button"[^>]*disabled/);
     expect(html).toContain('data-testid="send-dialog"');
     expect(html).toContain("Send Nairobi launch");
-    expect(html).toMatch(/<button[^>]*data-testid="publish-placeholder"[^>]*>Publish results<\/button>/);
+    expect(html).toMatch(/<button[^>]*data-testid="publish-button"[^>]*>Publish results<\/button>/);
+    expect(html).not.toMatch(/<button[^>]*data-testid="publish-button"[^>]*disabled/);
+    expect(html).toContain('data-testid="share-link-dialog"');
+    expect(html).toContain("Publish results for Nairobi launch");
+    expect(html).not.toContain("publish-placeholder");
     expect(html.indexOf('id="sends"')).toBeLessThan(html.indexOf("send-button"));
-    expect(html.indexOf('id="share-links"')).toBeLessThan(html.indexOf("publish-placeholder"));
+    expect(html.indexOf('id="share-links"')).toBeLessThan(html.indexOf("publish-button"));
+  });
+
+  it("lists the campaign's share links from v_share_links with the view's status (Story 5.2 AC3) — Revoke only for an owner on active rows", async () => {
+    responses.campaigns = { data: campaignRow, error: null };
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    const links = [
+      { ...shareLinkRow, id: "l2", created_at: "2026-09-15T12:00:00+00:00", expires_at: "2026-10-01T00:00:00+00:00", status: "active" },
+      { ...shareLinkRow, id: "l1", revoked_at: "2026-09-15T10:00:00+00:00", status: "revoked" },
+    ];
+    responses.v_share_links = { data: links, error: null };
+    const analyst = await renderDetail(KIL_0016);
+    expect(analyst).toContain('data-testid="share-link-list"');
+    expect(analyst.indexOf('data-link-id="l2"')).toBeLessThan(analyst.indexOf('data-link-id="l1"'));
+    expect(analyst).toContain('data-status="active"');
+    expect(analyst).toContain('data-status="revoked"');
+    expect(analyst).toContain("01 Oct 2026, 00:00 UTC");
+    expect(analyst).toContain('data-testid="share-link-expiry">never<');
+    expect(analyst).not.toContain('data-testid="share-link-revoke"');
+    expect(analyst).not.toContain("No share links yet");
+
+    role = "owner";
+    responses.campaigns = { data: campaignRow, error: null };
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses.v_share_links = { data: links, error: null };
+    const owner = await renderDetail(KIL_0016);
+    expect(owner.match(/data-testid="share-link-revoke"/g)?.length).toBe(1);
+    expect(owner).toMatch(/data-link-id="l2"[\s\S]*?data-testid="share-link-revoke"[\s\S]*?data-link-id="l1"/);
+  });
+
+  it("renders the share-links alert with Retry (never an empty list) when v_share_links fails — header, figures and sends intact", async () => {
+    role = "owner";
+    responses.campaigns = { data: campaignRow, error: null };
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses.v_share_links = { data: null, error: { message: "v_share_links timed out" } };
+    const html = await renderDetail(KIL_0016);
+    expect(html).toContain(`data-digest="${errorDigest("v_share_links timed out")}"`);
+    expect(html).not.toContain("v_share_links timed out");
+    expect(html).toContain("Retry");
+    expect(html).not.toContain("No share links yet");
+    expect(html).not.toContain("share-link-list");
+    expect(html).toContain("119.16%");
+    expect(html).toContain("No sends yet");
+    // the Publish button still renders: the write path does not depend on the read
+    expect(html).toContain('data-testid="publish-button"');
   });
 
   it("lists the campaign's sends with their status (Story 4.4 AC1/AC3) and polls while one is in flight", async () => {
