@@ -120,7 +120,8 @@ select pg_temp.as_user('00000000-0000-4000-8000-0000000000fe');
 select is(public.current_app_role(), null, 'R4 a user with no app_users row has a null role');
 select throws_ok($$ select public.confirm_send('00000000-0000-4000-8000-00000000c001', 1) $$, 'P0001', 'not_owner', 'R5 null role → not_owner (is distinct from, never a silent pass)');
 select pg_temp.as_postgres();
-select is((select count(*) from public.sends), 1::bigint, 'R6 nothing was written: still only the fixture send');
+select is((select count(*) from public.sends where brand_id in (current_setting('confirm.brand_a')::uuid, current_setting('confirm.brand_b')::uuid)), 1::bigint,
+  'R6 nothing was written: still only the fixture send (scoped to the fixture brands — as postgres the table also holds the seed send log, Story 4.5)');
 
 -- ============================================================================
 -- O: as the owner of brand A — the error contract, then the writes.
