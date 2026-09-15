@@ -214,13 +214,16 @@ describe("/contacts paging", () => {
     expect(html).toMatch(/aria-disabled="true"[^>]*><span>Next<\/span>/);
   });
 
-  it("treats a page past the end as 'No contacts match' with a truthful pager", async () => {
+  it("treats a page past the end as 'No contacts on this page' naming the last page — never 'these filters'", async () => {
     responses.v_contacts = [
       { data: null, error: { message: "Requested range not satisfiable", code: "PGRST103" }, count: null },
       { data: null, error: null, count: 82205 },
     ];
     const html = await render({ page: "99999" });
-    expect(html).toContain("No contacts match");
+    expect(html).toContain("No contacts on this page");
+    expect(html).toContain("the last page is 1,645");
+    expect(html).not.toContain("No contacts match");
+    expect(html).not.toContain("these filters");
     expect(html).toContain("Page 99,999 of 1,645");
     expect(html).toContain('href="/contacts?page=1645"'); // Previous lands on the last real page
     expect(html).toMatch(/aria-disabled="true"[^>]*><span>Next<\/span>/);

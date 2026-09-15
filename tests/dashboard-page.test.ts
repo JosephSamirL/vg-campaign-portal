@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { errorDigest } from "../lib/error-digest";
 
 /*
  * `/dashboard` page contract (Story 3.2): the async server component rendered with a
@@ -217,7 +218,8 @@ describe("/dashboard error states (per section, never a 0)", () => {
     const html = await render();
     expect((html.match(/data-state="error"/g) ?? []).length).toBe(2);
     expect(html).not.toContain('data-testid="metric-value"');
-    expect(html).toContain("does not exist");
+    expect(html).not.toContain("does not exist");
+    expect(html).toContain(`data-digest="${errorDigest('relation "public.v_dashboard_totals" does not exist')}"`);
     expect((html.match(/>Retry</g) ?? []).length).toBe(2);
     // the rest of the page is intact
     expect((html.match(/<rect[^>]*data-day=/g) ?? []).length).toBe(30);
@@ -228,7 +230,8 @@ describe("/dashboard error states (per section, never a 0)", () => {
     ok();
     responses.v_signups_30d = { data: null, error: { message: "signups view broken" } };
     const html = await render();
-    expect(html).toContain("signups view broken");
+    expect(html).not.toContain("signups view broken");
+    expect(html).toContain(`data-digest="${errorDigest("signups view broken")}"`);
     expect(html).not.toContain("data-day=");
     expect(html).not.toContain("(UTC)");
     expect(html).toContain("82,205");
@@ -238,7 +241,8 @@ describe("/dashboard error states (per section, never a 0)", () => {
     ok();
     responses.v_campaign_performance = { data: null, error: { message: "performance view broken" } };
     const html = await render();
-    expect(html).toContain("performance view broken");
+    expect(html).not.toContain("performance view broken");
+    expect(html).toContain(`data-digest="${errorDigest("performance view broken")}"`);
     expect(html).not.toContain("119.16%");
     expect(html).not.toContain("as reported by the source");
     expect(html).toContain("82,205");
@@ -248,7 +252,8 @@ describe("/dashboard error states (per section, never a 0)", () => {
     ok();
     responses.metric_rules = { data: null, error: { message: "rules unreadable" } };
     const html = await render();
-    expect(html).toContain("rules unreadable");
+    expect(html).not.toContain("rules unreadable");
+    expect(html).toContain(`data-digest="${errorDigest("rules unreadable")}"`);
     expect(html).not.toContain("82,205");
     expect(html).not.toContain("data-day=");
     expect(html).not.toContain("119.16%");

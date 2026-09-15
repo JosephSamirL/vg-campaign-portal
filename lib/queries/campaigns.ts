@@ -71,16 +71,21 @@ export async function getCampaign(supabase: Supabase, id: string): Promise<Resul
 /**
  * Every performance row for one campaign: the `reported` row first, then (from Story 6.2 on)
  * one `portal` row per send. Same query shape then as now — 6.2 only adds rows to the view.
+ * `source` is ordered **descending** because `'reported' > 'portal'` alphabetically; a stable
+ * in-memory pass then pins the contract even if the view's ordering ever changes.
  */
 export async function getCampaignPerformance(supabase: Supabase, campaignId: string): Promise<Result<CampaignPerformanceRow[]>> {
   const { data, error } = await supabase
     .from("v_campaign_performance")
     .select("*")
     .eq("campaign_id", campaignId)
-    .order("source")
+    .order("source", { ascending: false })
     .order("send_id", { nullsFirst: true });
   if (error) return { ok: false, message: error.message };
-  return narrow(data ?? []);
+  const rows = narrow(data ?? []);
+  if (!rows.ok) return rows;
+  const rank = (r: CampaignPerformanceRow) => (r.source === "reported" ? 0 : 1);
+  return { ok: true, data: [...rows.data].sort((a, b) => rank(a) - rank(b)) };
 }
 
 /**

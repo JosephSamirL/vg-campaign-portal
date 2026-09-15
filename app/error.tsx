@@ -8,8 +8,11 @@ import { Button } from "@/components/ui/button";
  * (portal) layout's `getCurrentAppUser()` when Auth or PostgREST fails (a segment's own
  * error.tsx cannot catch its layout, so this one has to live here). The session is left
  * untouched: a DB hiccup must never read as "no brand access" (1.5 review, Medium #2).
+ *
+ * Retry is Next 16's `retry` — `startTransition(() => { router.refresh(); reset() })` — so the
+ * server render is re-run; `reset()` alone only clears the boundary and replays the same failure.
  */
-export default function RootError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
+export default function RootError({ error, retry }: { error: Error & { digest?: string }; retry: () => void }) {
   useEffect(() => {
     console.error("portal_error", error.digest ?? error.message);
   }, [error]);
@@ -21,7 +24,7 @@ export default function RootError({ error, reset }: { error: Error & { digest?: 
         <p className="text-sm text-muted-foreground">
           The portal could not load your account just now. Your session is unchanged — try again in a moment.
         </p>
-        <Button onClick={reset}>Try again</Button>
+        <Button onClick={retry}>Try again</Button>
       </div>
     </div>
   );

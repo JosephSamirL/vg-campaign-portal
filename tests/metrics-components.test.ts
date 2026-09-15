@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 import { describe, expect, it, vi } from "vitest";
+import { errorDigest } from "../lib/error-digest";
 
 /*
  * `components/metrics/*` (Story 3.2) — shared by the dashboard and the campaigns/contacts
@@ -71,7 +72,10 @@ describe("MetricTile", () => {
     expect(html).toContain('data-state="error"');
     expect(html).toContain('role="alert"');
     expect(html).toContain("Retry");
-    expect(html).toContain("does not exist");
+    // generic copy + digest only: the raw message never reaches the browser
+    expect(html).not.toContain("does not exist");
+    expect(html).toContain(`data-digest="${errorDigest('relation "v_dashboard_totals" does not exist')}"`);
+    expect(html).toContain("quote reference");
     expect(html).not.toContain('data-testid="metric-value"');
     expect(html).not.toMatch(/>0</);
   });

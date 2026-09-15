@@ -264,6 +264,18 @@ pnpm seed
 
 Expected output: the tables above (the hosted `contacts` start empty, so the four contacts runs report the first-load numbers from *Import — contacts*). Run it twice and paste both `Import summary` tables here in place of this paragraph.
 
+## Performance
+
+_NFR-3: every portal page answers in under 2 s at the full load. **Local production build, full data** — `next build` + `next start` against the local stack with the complete seed load (Kilele 82,205 live contacts), signed in as the Kilele analyst, `curl -w '%{time_total}'`, one warm-up then ten timed requests per URL (Story 3.3). **Hosted re-measure pending seed load**: the hosted project has no contacts until the seed runs there, so a hosted timing today would measure an empty view — re-run the three URLs against https://vg-campaign-portal.vercel.app once it exists and replace this table._
+
+| URL (Kilele analyst) | p50 | max of 10 |
+|---|---|---|
+| `/contacts` (page 1 of 1,645) | 48 ms | 53 ms |
+| `/contacts?q=ami` (6,306 matches, 127 pages) | 153 ms | 165 ms |
+| `/contacts?contactable=true&page=800` (page 800 of 1,026) | 57 ms | 58 ms |
+
+`explain analyze` of the `q=ami` page query as the analyst, under RLS through the `security_invoker` view: **72.9 ms** (brand-scoped scans; no extra index added — the trigram / `text_pattern_ops` indexes from `0002` are not what a contains-search uses, and the budget has 10× headroom). Same build, same session (3.2 / 3.4 review runs): `/dashboard` p50 42 ms / max 50 ms, `/campaigns` p50 42 ms / max 50 ms, `/campaigns/<id>` p50 31 ms / max 35 ms. `next dev` requests are 0.1–0.7 s and are not the measurement.
+
 ## Table / function inventory
 
 _Grows as migrations land. Every `public` table: RLS enabled + forced, one `select` policy `brand_id = (select current_brand_id())` (or the row's own `auth.uid()`), `SELECT` to `authenticated` only, nothing to `anon`; writes only through RPCs / service role._

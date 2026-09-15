@@ -4,8 +4,12 @@ import { useEffect } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 
-/** Route error boundary for `/campaigns/[id]`: unexpected throws → destructive alert + Retry. */
-export default function CampaignError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
+/**
+ * Route error boundary for `/campaigns/[id]`: unexpected throws → destructive alert + Retry.
+ * Retry is Next 16's `retry` — `startTransition(() => { router.refresh(); reset() })` — so the
+ * server render is re-run; `reset()` alone only clears the boundary and replays the same failure.
+ */
+export default function CampaignError({ error, retry }: { error: Error & { digest?: string }; retry: () => void }) {
   useEffect(() => {
     console.error("campaign_error", error.digest ?? error.message);
   }, [error]);
@@ -17,7 +21,7 @@ export default function CampaignError({ error, reset }: { error: Error & { diges
         <AlertTitle>Something broke on our side — nothing was changed</AlertTitle>
         <AlertDescription className="flex flex-col items-start gap-3">
           <p>This campaign could not be read just now. Try again in a moment.</p>
-          <Button variant="outline" size="sm" onClick={reset}>
+          <Button variant="outline" size="sm" onClick={retry}>
             Retry
           </Button>
         </AlertDescription>

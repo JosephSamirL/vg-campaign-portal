@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { PAGE_SIZE, contactsParamsSchema, getContactsPage } from "../lib/queries/contacts";
+import { MAX_PAGE, PAGE_SIZE, contactsParamsSchema, escapeLike, getContactsPage } from "../lib/queries/contacts";
 
 /**
  * `lib/queries/contacts.ts` contract (Story 3.3): the zod boundary is total (every invalid
@@ -30,6 +30,24 @@ describe("contactsParamsSchema", () => {
 
   it("keeps the Kilele last page", () => {
     expect(contactsParamsSchema.parse({ page: "1681" }).page).toBe(1681);
+  });
+
+  it("caps page at MAX_PAGE: a huge safe integer is a default, not a giant offset", () => {
+    expect(MAX_PAGE).toBe(1_000_000);
+    expect(contactsParamsSchema.parse({ page: String(MAX_PAGE) }).page).toBe(MAX_PAGE);
+    expect(contactsParamsSchema.parse({ page: String(MAX_PAGE + 1) }).page).toBe(1);
+    expect(contactsParamsSchema.parse({ page: "9007199254740991" }).page).toBe(1);
+  });
+
+  it("keeps LIKE metacharacters in q (the form echoes them); escapeLike neutralises them for the query", () => {
+    expect(contactsParamsSchema.parse({ q: "100%" }).q).toBe("100%");
+    expect(contactsParamsSchema.parse({ q: "john_doe" }).q).toBe("john_doe");
+    expect(contactsParamsSchema.parse({ q: "*" }).q).toBe("*");
+    expect(escapeLike("100%")).toBe("100\\%");
+    expect(escapeLike("john_doe")).toBe("john\\_doe");
+    expect(escapeLike("*")).toBe("\\*");
+    expect(escapeLike("a\\b")).toBe("a\\\\b");
+    expect(escapeLike("sarah.wanjiru")).toBe("sarah.wanjiru");
   });
 
   it("trims q, strips PostgREST reserved characters, keeps dots for emails", () => {
@@ -106,6 +124,20 @@ describe("getContactsPage", () => {
       ["eq", ["contactable", true]],
       ["range", [100, 149]],
     ]);
+  });
+
+  it("escapes %, _ and * in q so they match themselves, never every row", async () => {
+    for (const [q, expected] of [
+      ["%", "full_name.ilike.*\\%*,email.ilike.\\%*"],
+      ["_", "full_name.ilike.*\\_*,email.ilike.\\_*"],
+      ["*", "full_name.ilike.*\\**,email.ilike.\\**"],
+      ["john_doe", "full_name.ilike.*john\\_doe*,email.ilike.john\\_doe*"],
+    ] as const) {
+      calls.length = 0;
+      responses.push({ data: [], error: null, count: 0 });
+      await getContactsPage(supabase, contactsParamsSchema.parse({ q }));
+      expect(calls).toContainEqual(["or", [expected]]);
+    }
   });
 
   it("maps status=unknown to `is null` and contactable=false to eq false", async () => {

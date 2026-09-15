@@ -1,5 +1,6 @@
+import Link from "next/link";
 import { ContactsFilters } from "@/components/contacts/contacts-filters";
-import { ContactsPagination } from "@/components/contacts/contacts-pagination";
+import { ContactsPagination, contactsHref } from "@/components/contacts/contacts-pagination";
 import { ContactsTable } from "@/components/contacts/contacts-table";
 import { EmptyState } from "@/components/layout/empty-state";
 import { contactsParamsSchema, getContactableRule, getContactsPage } from "@/lib/queries/contacts";
@@ -46,7 +47,17 @@ export default async function ContactsPage({ searchParams }: { searchParams: Pro
       <ContactsFilters params={params} />
 
       {rows.length === 0 ? (
-        filtered || count > 0 ? (
+        count > 0 ? (
+          // rows only come back empty with a non-zero count when `page` is past the end (PGRST103)
+          <EmptyState
+            title="No contacts on this page"
+            description={`Page ${page.toLocaleString("en-US")} is past the end — the last page is ${pages.toLocaleString("en-US")}.`}
+          >
+            <Link href={contactsHref(params, pages)} className="text-sm underline underline-offset-4">
+              Go to the last page
+            </Link>
+          </EmptyState>
+        ) : filtered ? (
           <EmptyState title="No contacts match" description="Nothing matches these filters. Change or clear them to see more." />
         ) : (
           <EmptyState title="No contacts loaded yet" description="Seed data has not been loaded for this brand." />

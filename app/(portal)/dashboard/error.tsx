@@ -8,8 +8,11 @@ import { Button } from "@/components/ui/button";
  * Route error boundary for `/dashboard`: query failures are handled per section inside the
  * page, so only an unexpected throw (a render bug, an auth failure) lands here. Read-only
  * route, so the copy can promise nothing changed. No number is rendered from this state.
+ *
+ * Retry is Next 16's `retry` — `startTransition(() => { router.refresh(); reset() })` — so the
+ * server render is re-run; `reset()` alone only clears the boundary and replays the same failure.
  */
-export default function DashboardError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
+export default function DashboardError({ error, retry }: { error: Error & { digest?: string }; retry: () => void }) {
   useEffect(() => {
     console.error("dashboard_error", error.digest ?? error.message);
   }, [error]);
@@ -21,7 +24,7 @@ export default function DashboardError({ error, reset }: { error: Error & { dige
         <AlertTitle>Something broke on our side — nothing was changed</AlertTitle>
         <AlertDescription className="flex flex-col items-start gap-3">
           <p>The dashboard could not be rendered just now. Try again in a moment.</p>
-          <Button variant="outline" size="sm" onClick={reset}>
+          <Button variant="outline" size="sm" onClick={retry}>
             Retry
           </Button>
         </AlertDescription>

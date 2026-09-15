@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { errorDigest } from "../lib/error-digest";
 
 /**
  * `/campaigns` and `/campaigns/[id]` page contracts (Story 3.4). Both pages are async server
@@ -152,7 +153,9 @@ describe("/campaigns", () => {
     responses.v_campaign_performance = { data: null, error: { message: "relation does not exist", code: "42P01" } };
     const html = await renderList();
     expect(html).toContain('data-testid="retry-alert"');
-    expect(html).toContain("relation does not exist");
+    // the raw PostgREST text stays server-side; the browser gets a generic sentence + digest
+    expect(html).not.toContain("relation does not exist");
+    expect(html).toContain(`data-digest="${errorDigest("relation does not exist")}"`);
     expect(html).toContain("Retry");
     expect(html).not.toContain("campaigns-table");
     expect(html).not.toContain("0.00%");
@@ -162,7 +165,9 @@ describe("/campaigns", () => {
     responses.v_campaign_performance = { data: [kil16], error: null };
     responses.metric_rules = { data: rules.slice(1), error: null };
     const html = await renderList();
-    expect(html).toContain("metric_rules is missing: delivered_rate");
+    expect(html).toContain('data-testid="retry-alert"');
+    expect(html).toContain(`data-digest="${errorDigest("metric_rules is missing: delivered_rate")}"`);
+    expect(html).not.toContain("metric_rules is missing");
     expect(html).not.toContain("campaigns-table");
   });
 
@@ -242,7 +247,7 @@ describe("/campaigns", () => {
     responses.v_campaign_performance = { data: [{ ...kil16, campaign_id: null }], error: null };
     const html = await renderList();
     expect(html).toContain('data-testid="retry-alert"');
-    expect(html).toContain("without campaign_id");
+    expect(html).not.toContain("without campaign_id");
   });
 });
 
@@ -264,7 +269,8 @@ describe("/campaigns/[id]", () => {
     responses.v_campaign_performance = { data: [], error: null };
     const html = await renderDetail(KIL_0016);
     expect(html).toContain('data-testid="retry-alert"');
-    expect(html).toContain("connection refused");
+    expect(html).not.toContain("connection refused");
+    expect(html).toContain(`data-digest="${errorDigest("connection refused")}"`);
   });
 
   it("renders header, figures and the two empty sections for an analyst — with no action buttons", async () => {
@@ -274,7 +280,7 @@ describe("/campaigns/[id]", () => {
     expect(calls.v_campaign_performance).toEqual([
       ["select", ["*"]],
       ["eq", ["campaign_id", KIL_0016]],
-      ["order", ["source"]],
+      ["order", ["source", { ascending: false }]],
       ["order", ["send_id", { nullsFirst: true }]],
     ]);
     // header
@@ -327,13 +333,17 @@ describe("/campaigns/[id]", () => {
     const html = await renderDetail(KIL_0016);
     expect(html).toContain("Portal send 9d0e1f2a");
     expect(html).toContain("0.03%");
+    // positional: the view rows arrive portal-first here, the reported block still renders first
+    expect(html.indexOf("Reported by the source")).toBeGreaterThan(-1);
+    expect(html.indexOf("Reported by the source")).toBeLessThan(html.indexOf("Portal send 9d0e1f2a"));
   });
 
   it("renders the figures alert (and still the sections) when the performance query fails", async () => {
     responses.campaigns = { data: campaignRow, error: null };
     responses.v_campaign_performance = { data: null, error: { message: "view timed out" } };
     const html = await renderDetail(KIL_0016);
-    expect(html).toContain("view timed out");
+    expect(html).toContain('data-testid="retry-alert"');
+    expect(html).not.toContain("view timed out");
     expect(html).toContain("No sends through the portal yet");
     expect(html).not.toContain("119.16%");
   });

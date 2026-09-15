@@ -15,13 +15,18 @@ export const PAGE_SIZE = 50;
 
 export const CONTACT_STATUSES = ["active", "pending", "bounced", "unsubscribed", "unknown"] as const;
 
+/** Largest `page` a link may carry; beyond it the value is a default, not a giant offset. */
+export const MAX_PAGE = 1_000_000;
+
 /**
  * Total parser: every field carries `.catch()`, so `.parse()` never throws — a bad link is a
  * default, not a 500 (AC2). `q` drops the characters PostgREST's `or=` grammar reserves
  * (`,` `(` `)` `"` `\`) and keeps `.` so an email prefix such as `sarah.wanjiru` still matches.
+ * LIKE metacharacters (`%` `_` `*`) are kept here — the form echoes what was typed — and
+ * escaped at query time by `escapeLike`, so they match themselves rather than "anything".
  */
 export const contactsParamsSchema = z.object({
-  page: z.coerce.number().int().min(1).catch(1),
+  page: z.coerce.number().int().min(1).max(MAX_PAGE).catch(1),
   q: z
     .string()
     .trim()
@@ -69,11 +74,25 @@ function selectHead(supabase: Supabase) {
   return supabase.from("v_contacts").select("id", { count: "exact", head: true });
 }
 
+/**
+ * Neutralises the LIKE metacharacters in a search term: `\` (Postgres's default escape),
+ * `%`, `_` and `*` (PostgREST rewrites `*` to `%` inside `like`/`ilike` values) each get a
+ * leading `\`, so `?q=%` matches names containing a literal `%` — none — rather than every
+ * row. Verified against the local stack: `ilike.*\%*` / `*\_*` / `*\**` → 0 rows, the bare
+ * forms → all rows.
+ */
+export function escapeLike(term: string): string {
+  return term.replace(/[\\%_*]/g, "\\$&");
+}
+
 /** The filters, applied identically to the page query and the head-only count query. */
 function applyFilters<Q extends ReturnType<typeof selectPage> | ReturnType<typeof selectHead>>(query: Q, p: ContactsParams): Q {
   let q = query;
   // `*` is the PostgREST like wildcard inside `or=` (a `%` would be URL-mangled).
-  if (p.q) q = q.or(`full_name.ilike.*${p.q}*,email.ilike.${p.q}*`) as Q;
+  if (p.q) {
+    const term = escapeLike(p.q);
+    q = q.or(`full_name.ilike.*${term}*,email.ilike.${term}*`) as Q;
+  }
   if (p.status === "unknown") q = q.is("status", null) as Q;
   else if (p.status) q = q.eq("status", p.status) as Q;
   if (p.contactable) q = q.eq("contactable", p.contactable === "true") as Q;
@@ -89,7 +108,7 @@ function pagesFor(count: number): number {
  * filtered total (`count: 'exact'` — the page count must be exact, so never `'planned'`).
  * PostgREST answers an offset past the total with `PGRST103` rather than an empty page; a
  * stale `?page=` is not a failed query, so that case re-reads the exact count head-only and
- * returns an empty page (the UI shows "No contacts match" with a truthful pager). Any other
+ * returns an empty page (the UI says "No contacts on this page" and names the last page). Any other
  * error is returned as `ok: false` — the caller renders an alert, never `0 contacts`.
  */
 export async function getContactsPage(supabase: Supabase, p: ContactsParams): Promise<Result<ContactsPage>> {
