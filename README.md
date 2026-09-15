@@ -252,6 +252,18 @@ Campaign issues, in full: Kilele `duplicate_external_id` ×2 (`CMP-014` at row 6
 
 Every number equals the architecture's expected table (S16 / Story 2.4 Dev Notes) — no deviation. Least-sure candidates for the submission note: the 633 Marrakech events whose `campaign_external_id` names no Marrakech campaign (loaded, `campaign_id null`, excluded from campaign performance); the two byte-identical Kilele campaign pairs collapsed to one row each; Karoo `CMP-014` whose parent pointer `KIL-0007` lives in Kilele (pointer dropped); the 8,412 / 4,900 duplicate event ids (byte-identical rows, one kept). Each has a pgTAP case in `supabase/tests/0004_import_campaigns_events.test.sql` (134 cases: both normalisers, every reject / warn reason, cross-brand parent, follow-a-routed-contact, `campaign_id` never resolved by `external_id` alone, idempotency with a fresh and with the same `run_id`).
 
+**Hosted full load pending: needs DB password.** `0004_import_campaigns_events.sql` is pushed (`supabase migration list`: `0000–0004` local = remote). The seed itself runs over the Supavisor **session** pooler with the project's database password (`SUPABASE_DB_PASSWORD` is not in this environment); exact command, from the repo root with Node 22:
+
+```bash
+# hosted — one-time engineer-run job over the session pooler (port 5432, needed for COPY and the long import calls)
+NEXT_PUBLIC_SUPABASE_URL=https://qaocabdpaxetofqcfgsa.supabase.co \
+SUPABASE_SERVICE_ROLE_KEY="$(supabase projects api-keys --project-ref qaocabdpaxetofqcfgsa --reveal -o json | jq -r '.[] | select(.type=="secret") | .api_key')" \
+DATABASE_URL="postgresql://postgres.qaocabdpaxetofqcfgsa:${SUPABASE_DB_PASSWORD}@aws-1-eu-west-1.pooler.supabase.com:5432/postgres" \
+pnpm seed
+```
+
+Expected output: the tables above (the hosted `contacts` start empty, so the four contacts runs report the first-load numbers from *Import — contacts*). Run it twice and paste both `Import summary` tables here in place of this paragraph.
+
 ## Table / function inventory
 
 _Grows as migrations land. Every `public` table: RLS enabled + forced, one `select` policy `brand_id = (select current_brand_id())` (or the row's own `auth.uid()`), `SELECT` to `authenticated` only, nothing to `anon`; writes only through RPCs / service role._
