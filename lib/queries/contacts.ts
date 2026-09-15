@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import type { Database } from "@/lib/database.types";
+import type { MetricRule, Result } from "@/lib/queries/dashboard";
 
 /**
  * `/contacts` boundary and query (Story 3.3). Every filter lives in the URL (D-12); this
@@ -48,8 +49,7 @@ export type ContactRow = Pick<
   | "signup_at"
 >;
 
-/** Same shape as Story 3.2's `lib/queries/dashboard.ts` `Result` (structurally interchangeable). */
-export type Result<T> = { ok: true; data: T } | { ok: false; message: string };
+export type { MetricRule, Result };
 
 export type ContactsPage = { rows: ContactRow[]; count: number; page: number; pages: number };
 
@@ -108,8 +108,6 @@ export async function getContactsPage(supabase: Supabase, p: ContactsParams): Pr
   const total = count ?? 0;
   return { ok: true, data: { rows: data ?? [], count: total, page: p.page, pages: pagesFor(total) } };
 }
-
-export type MetricRule = Pick<Database["public"]["Tables"]["metric_rules"]["Row"], "key" | "label" | "rule_text" | "alternative_text">;
 
 /**
  * The `contactable` rule text for the column header (AC3). One row, read from `metric_rules`
