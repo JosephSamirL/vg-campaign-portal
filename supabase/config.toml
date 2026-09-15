@@ -155,11 +155,11 @@ max_indexes = 5
 enabled = true
 # The base URL of your website. Used as an allow-list for redirects and for constructing URLs used
 # in emails.
-site_url = "http://127.0.0.1:3000"
+site_url = "http://localhost:3000"
 # The public URL that Auth serves on. Defaults to the API external URL with `/auth/v1` appended.
 # external_url = ""
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
-additional_redirect_urls = ["https://127.0.0.1:3000"]
+additional_redirect_urls = ["http://localhost:3000/**"]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # JWT issuer URL. If not set, defaults to auth.external_url.
@@ -172,7 +172,9 @@ enable_refresh_token_rotation = true
 # Requires enable_refresh_token_rotation = true.
 refresh_token_reuse_interval = 10
 # Allow/disallow new user signups to your project.
-enable_signup = true
+# Story 1.4 (D-9 allow-list): OFF. The seven logins are created by `pnpm seed` through the Admin API;
+# nobody outside `app_users` can sign up (email or Google). Same setting on the hosted project.
+enable_signup = false
 # Allow/disallow anonymous sign-ins to your project.
 enable_anonymous_sign_ins = false
 # Allow/disallow testing manual linking of accounts
@@ -318,6 +320,21 @@ max_frequency = "5s"
 # Use an external OAuth provider. The full list of providers are: `apple`, `azure`, `bitbucket`,
 # `discord`, `facebook`, `github`, `gitlab`, `google`, `keycloak`, `linkedin_oidc`, `notion`, `twitch`,
 # `twitter`, `x`, `slack`, `spotify`, `workos`, `zoom`.
+[auth.external.google]
+# Story 1.4: local Google sign-in is optional. To enable, put GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET in the
+# git-ignored `supabase/.env`, add `http://127.0.0.1:54321/auth/v1/callback` as an authorised redirect URI on the
+# Google Cloud OAuth client, then set `enabled = true`. Kept off by default so the local Auth container never
+# starts with an empty client id.
+enabled = false
+client_id = "env(GOOGLE_CLIENT_ID)"
+# DO NOT commit your OAuth provider secret to git. Use environment variable substitution instead:
+secret = "env(GOOGLE_CLIENT_SECRET)"
+redirect_uri = ""
+url = ""
+# Required for local sign in with Google auth.
+skip_nonce_check = true
+email_optional = false
+
 [auth.external.apple]
 enabled = false
 client_id = ""
