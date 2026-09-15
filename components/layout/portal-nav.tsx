@@ -7,6 +7,7 @@ import type { AppRole } from "@/lib/current-user";
 export const NAV_LINKS = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/contacts", label: "Contacts" },
+  { href: "/campaigns", label: "Campaigns" },
   { href: "/imports", label: "Imports" },
 ] as const;
 

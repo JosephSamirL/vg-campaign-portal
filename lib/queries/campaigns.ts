@@ -1,4 +1,6 @@
 import type { Database } from "@/lib/database.types";
+import type { MetricKey } from "@/lib/rules/keys";
+import type { MetricRule, Result } from "@/lib/rules/metric-rules";
 import type { createClient } from "@/lib/supabase/server";
 
 /*
@@ -13,12 +15,11 @@ import type { createClient } from "@/lib/supabase/server";
 
 export type Supabase = Awaited<ReturnType<typeof createClient>>;
 
-/** Per-section query outcome: the page renders data OR an alert, never zeros from an error. */
-export type Result<T> = { ok: true; data: T } | { ok: false; message: string };
+/** Shared with the dashboard (Story 3.2): per-section outcome and the `metric_rules` row type. */
+export type { MetricRule, Result };
 
 export type PerformanceRow = Database["public"]["Views"]["v_campaign_performance"]["Row"];
 export type CampaignRow = Database["public"]["Tables"]["campaigns"]["Row"];
-export type MetricRule = Database["public"]["Tables"]["metric_rules"]["Row"];
 
 /**
  * The generated view type is all-nullable (Postgres cannot prove view columns non-null).
@@ -28,8 +29,9 @@ export type MetricRule = Database["public"]["Tables"]["metric_rules"]["Row"];
 export type CampaignPerformanceRow = PerformanceRow & { campaign_id: string; external_id: string; source: string };
 
 /** The five rate keys the campaign pages caption from `metric_rules` (D-5). */
-export const RATE_KEYS = ["delivered_rate", "bounce_rate", "open_rate", "click_rate", "unsubscribe_rate"] as const;
+export const RATE_KEYS = ["delivered_rate", "bounce_rate", "open_rate", "click_rate", "unsubscribe_rate"] as const satisfies readonly MetricKey[];
 export type RateKey = (typeof RATE_KEYS)[number];
+/** A `Record<MetricKey, MetricRule>` from `getMetricRules` satisfies this too. */
 export type RateRules = Record<RateKey, MetricRule>;
 
 function narrow(rows: PerformanceRow[]): Result<CampaignPerformanceRow[]> {
