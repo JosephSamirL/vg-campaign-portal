@@ -45,3 +45,5 @@ next-env.d.ts
 .env.local
 supabase/.env
 credentials.txt
+.env*
+!.env.example
