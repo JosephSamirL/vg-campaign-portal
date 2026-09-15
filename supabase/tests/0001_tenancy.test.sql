@@ -30,8 +30,12 @@ insert into t_allow_secdef values ('current_brand_id'), ('current_app_role');
 
 create temp table t_view_exceptions(relname text);     -- views without brand_id; each needs its own assertion
 
+-- Column-level grants a role may hold (S4c/S4d). Empty until Story 5.1 adds the share_links
+-- SELECT columns for anon, e.g. insert into t_column_grant_exceptions values ('anon', 'share_links', 'SELECT').
+create temp table t_column_grant_exceptions(rolname text, relname text, privilege text);
+
 -- readable after the role switch to authenticated (pgTAP grants its own temp tables the same way)
-grant select on t_exposed_schemas, t_allow_anon_exec, t_allow_auth_exec, t_allow_secdef, t_view_exceptions to public;
+grant select on t_exposed_schemas, t_allow_anon_exec, t_allow_auth_exec, t_allow_secdef, t_view_exceptions, t_column_grant_exceptions to public;
 
 -- ===== fixtures — later stories append rows for their tables =====
 -- KILELE owner = user A, KAROO analyst = user B. Emails are fixture-<x>@tenancy.test, never a real
@@ -178,8 +182,9 @@ where c.relkind in ('r', 'p', 'v', 'm')
 order by n.nspname, c.relname;
 
 -- S4b: authenticated never writes a table or view directly (writes go through RPCs).
+-- TRUNCATE included: it ignores RLS, so a stray grant would let one tenant wipe every brand.
 select ok(
-  not has_table_privilege('authenticated', c.oid, 'INSERT,UPDATE,DELETE'),
+  not has_table_privilege('authenticated', c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE'),
   format('S4b authenticated has no write privilege: %I.%I', n.nspname, c.relname))
 from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
@@ -259,6 +264,52 @@ select is(other, 0::bigint, 'B8 other-brand rows = 0: ' || rel) from pg_temp.bra
 
 select pg_temp.as_postgres();
 select is(current_user::text, 'postgres', 'B9 role restored to postgres before finish');
+
+-- ============================================================================
+-- Appended structural assertions (Story 1.3 review follow-ups) — as postgres again.
+-- Appended after B9 so every earlier TAP number (quoted in the README mutation drill) is stable.
+-- ============================================================================
+
+-- S4c: anon holds no COLUMN-level privilege either (the four column privileges Postgres has:
+-- SELECT, INSERT, UPDATE, REFERENCES). has_table_privilege only sees whole-table
+-- grants, so `grant select (id, code) on public.brands to anon` slipped past S4. Story 5.1's
+-- share_links SELECT columns are the only planned exception (t_column_grant_exceptions).
+select ok(
+  not has_any_column_privilege('anon', c.oid, pr.privilege)
+  or exists (select 1 from t_column_grant_exceptions e
+             where e.rolname = 'anon' and e.relname = c.relname and upper(e.privilege) = pr.privilege),
+  format('S4c anon has no column privilege %s: %I.%I', pr.privilege, n.nspname, c.relname))
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+cross join (values ('SELECT'), ('INSERT'), ('UPDATE'), ('REFERENCES')) pr(privilege) -- DELETE is table-level only
+where c.relkind in ('r', 'p', 'v', 'm')
+  and n.nspname in (select nspname from t_exposed_schemas)
+order by n.nspname, c.relname, pr.privilege;
+
+-- S4d: authenticated holds no column-level write privilege (`grant update (role) on app_users`
+-- would be self-promotion to owner through a PostgREST PATCH).
+select ok(
+  not has_any_column_privilege('authenticated', c.oid, pr.privilege)
+  or exists (select 1 from t_column_grant_exceptions e
+             where e.rolname = 'authenticated' and e.relname = c.relname and upper(e.privilege) = pr.privilege),
+  format('S4d authenticated has no column write privilege %s: %I.%I', pr.privilege, n.nspname, c.relname))
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+cross join (values ('INSERT'), ('UPDATE')) pr(privilege) -- column privileges: DELETE is table-level (S4b)
+where c.relkind in ('r', 'p', 'v', 'm')
+  and n.nspname in (select nspname from t_exposed_schemas)
+order by n.nspname, c.relname, pr.privilege;
+
+-- S7b: every security definer function pins search_path (S7 only checks WHICH functions are
+-- secdef; dropping `set search_path = ''` is an isolation-weakening edit it would not notice).
+select ok(
+  exists (select 1 from unnest(coalesce(p.proconfig, '{}'::text[])) cfg where cfg like 'search_path=%'),
+  format('S7b security definer function pins search_path: %I.%s', n.nspname, p.oid::regprocedure))
+from pg_proc p
+join pg_namespace n on n.oid = p.pronamespace
+where p.prosecdef
+  and n.nspname in (select nspname from t_exposed_schemas)
+order by n.nspname, p.oid::regprocedure::text;
 
 select * from finish();
 rollback;
