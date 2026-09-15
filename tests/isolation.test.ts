@@ -25,6 +25,9 @@ export const TABLES = [
   "import_runs",
   "import_issues",
   "metric_rules", // Story 3.1: shared (no brand_id) — readable when signed in, refused anonymously
+  "sends", // Story 4.1: send records — SELECT only through PostgREST; empty locally until 4.2 confirms / 4.5 imports
+  "send_recipients",
+  "provider_batches",
 ] as const satisfies readonly (keyof Database["public"]["Tables"])[];
 /** Exposed views (Story 2.3+): same isolation contract as the tables they read. */
 export const VIEWS = [
@@ -44,6 +47,8 @@ type Relation = (typeof RELATIONS)[number];
  * setup since Story 2.4 (README "Seed load counts"); `metric_rules` and the metrics views (Story 3.1)
  * are filled by the migration / derived from the seeded tables. The own-brand > 0 check therefore
  * covers every relation; the anonymous refusal and the "no foreign brand_id" checks run regardless.
+ * Story 4.1's `sends` / `send_recipients` / `provider_batches` are NOT listed: nothing writes them until
+ * Story 4.2 (confirm) / 4.5 (seed send log) — own-brand > 0 for them is proven by the pgTAP fixtures meanwhile.
  */
 const SEEDED_TABLES: readonly Relation[] = [
   "brands",

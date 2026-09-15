@@ -488,6 +488,219 @@ export type Database = {
         }
         Relationships: []
       }
+      provider_batches: {
+        Row: {
+          batch_id: string
+          brand_id: string
+          created_at: string
+          last_event_id: string | null
+          last_ok_at: string | null
+          last_polled_at: string | null
+          next_cursor: string | null
+          polling: string
+          send_id: string
+        }
+        Insert: {
+          batch_id: string
+          brand_id: string
+          created_at?: string
+          last_event_id?: string | null
+          last_ok_at?: string | null
+          last_polled_at?: string | null
+          next_cursor?: string | null
+          polling?: string
+          send_id: string
+        }
+        Update: {
+          batch_id?: string
+          brand_id?: string
+          created_at?: string
+          last_event_id?: string | null
+          last_ok_at?: string | null
+          last_polled_at?: string | null
+          next_cursor?: string | null
+          polling?: string
+          send_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "provider_batches_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "brands"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "provider_batches_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "v_signups_30d"
+            referencedColumns: ["brand_id"]
+          },
+          {
+            foreignKeyName: "provider_batches_send_id_fkey"
+            columns: ["send_id"]
+            isOneToOne: true
+            referencedRelation: "sends"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      send_recipients: {
+        Row: {
+          address: string
+          brand_id: string
+          contact_id: string
+          external_id: string
+          send_id: string
+        }
+        Insert: {
+          address: string
+          brand_id: string
+          contact_id: string
+          external_id: string
+          send_id: string
+        }
+        Update: {
+          address?: string
+          brand_id?: string
+          contact_id?: string
+          external_id?: string
+          send_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "send_recipients_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "brands"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "send_recipients_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "v_signups_30d"
+            referencedColumns: ["brand_id"]
+          },
+          {
+            foreignKeyName: "send_recipients_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "send_recipients_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "v_contacts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "send_recipients_send_id_fkey"
+            columns: ["send_id"]
+            isOneToOne: false
+            referencedRelation: "sends"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sends: {
+        Row: {
+          accepted_count: number | null
+          batch_id: string | null
+          batch_key: string | null
+          body_sha256: string | null
+          brand_id: string
+          campaign_id: string
+          confirmed_at: string | null
+          confirmed_by: string | null
+          created_at: string
+          dispatch_attempts: number
+          dispatch_lease_until: string | null
+          dispatched_at: string | null
+          failure_reason: string | null
+          id: string
+          provider_responded_at: string | null
+          recipient_count: number
+          rejected_count: number | null
+          source: Database["public"]["Enums"]["send_source"]
+          status: Database["public"]["Enums"]["send_status"]
+        }
+        Insert: {
+          accepted_count?: number | null
+          batch_id?: string | null
+          batch_key?: string | null
+          body_sha256?: string | null
+          brand_id: string
+          campaign_id: string
+          confirmed_at?: string | null
+          confirmed_by?: string | null
+          created_at?: string
+          dispatch_attempts?: number
+          dispatch_lease_until?: string | null
+          dispatched_at?: string | null
+          failure_reason?: string | null
+          id?: string
+          provider_responded_at?: string | null
+          recipient_count: number
+          rejected_count?: number | null
+          source: Database["public"]["Enums"]["send_source"]
+          status?: Database["public"]["Enums"]["send_status"]
+        }
+        Update: {
+          accepted_count?: number | null
+          batch_id?: string | null
+          batch_key?: string | null
+          body_sha256?: string | null
+          brand_id?: string
+          campaign_id?: string
+          confirmed_at?: string | null
+          confirmed_by?: string | null
+          created_at?: string
+          dispatch_attempts?: number
+          dispatch_lease_until?: string | null
+          dispatched_at?: string | null
+          failure_reason?: string | null
+          id?: string
+          provider_responded_at?: string | null
+          recipient_count?: number
+          rejected_count?: number | null
+          source?: Database["public"]["Enums"]["send_source"]
+          status?: Database["public"]["Enums"]["send_status"]
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sends_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "brands"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sends_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "v_signups_30d"
+            referencedColumns: ["brand_id"]
+          },
+          {
+            foreignKeyName: "sends_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sends_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_campaign_performance"
+            referencedColumns: ["campaign_id"]
+          },
+        ]
+      }
     }
     Views: {
       v_campaign_performance: {
@@ -727,6 +940,18 @@ export type Database = {
         Args: { p: string }
         Returns: Database["public"]["Enums"]["event_type"]
       }
+      recipient_preview: {
+        Args: { p_campaign_id: string }
+        Returns: {
+          channel: string
+          country_mismatch_or_unknown: number
+          no_address: number
+          not_contactable: number
+          rule_text: string
+          target_country: string
+          total_count: number
+        }[]
+      }
     }
     Enums: {
       app_role: "owner" | "analyst"
@@ -740,6 +965,15 @@ export type Database = {
         | "complained"
         | "unknown"
       issue_severity: "reject" | "warn" | "route"
+      send_source: "portal" | "seed_send_log"
+      send_status:
+        | "pending"
+        | "confirmed"
+        | "dispatched"
+        | "reporting"
+        | "complete"
+        | "partial"
+        | "failed"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -882,6 +1116,16 @@ export const Constants = {
         "unknown",
       ],
       issue_severity: ["reject", "warn", "route"],
+      send_source: ["portal", "seed_send_log"],
+      send_status: [
+        "pending",
+        "confirmed",
+        "dispatched",
+        "reporting",
+        "complete",
+        "partial",
+        "failed",
+      ],
     },
   },
 } as const

@@ -25,9 +25,11 @@ create temp table t_allow_anon_exec(fn text);          -- 5.1: get_shared_result
 create temp table t_allow_auth_exec(fn text);
 insert into t_allow_auth_exec values ('current_brand_id'), ('current_app_role');
 insert into t_allow_auth_exec values ('is_contactable');   -- Story 3.1: security invoker, inlinable predicate (D-4)
+insert into t_allow_auth_exec values ('recipient_preview');   -- Story 4.1: secdef, brand-checked, raises not_in_brand / invalid_input
 
 create temp table t_allow_secdef(fn text);
 insert into t_allow_secdef values ('current_brand_id'), ('current_app_role');
+insert into t_allow_secdef values ('recipient_preview');      -- Story 4.1 (internal.recipient_classification has no grant and lives in internal: in neither list)
 
 create temp table t_view_exceptions(relname text);     -- views without brand_id; each needs its own assertion
 
@@ -90,6 +92,20 @@ begin
   -- brand_counts() never enumerates it — B7/B8 do not apply; B10 below asserts the shared read instead.
   -- The four views (v_dashboard_totals, v_signups_30d, v_campaign_performance, v_contacts) expose brand_id
   -- and are fed by the contacts / campaigns / brands fixtures above: own > 0 (1 / 30 / 1 / 1), other = 0.
+  -- Story 4.1: sends / send_recipients / provider_batches — one finished portal send per brand, one recipient
+  -- (that brand's own contact) and one provider batch each. status 'complete' keeps the partial unique index
+  -- (one active send per campaign) free for the per-RPC blocks of Stories 4.2+.
+  perform set_config('tenancy.campaign_a', (select id from public.campaigns where brand_id = ba and external_id = 'CMP-A1')::text, true);
+  perform set_config('tenancy.campaign_b', (select id from public.campaigns where brand_id = bb and external_id = 'CMP-B1')::text, true);
+  insert into public.sends (id, brand_id, campaign_id, status, source, recipient_count, batch_id)
+  values ('00000000-0000-4000-8000-0000000000a4', ba, current_setting('tenancy.campaign_a')::uuid, 'complete', 'portal', 1, 'FIX-BATCH-A'),
+         ('00000000-0000-4000-8000-0000000000b4', bb, current_setting('tenancy.campaign_b')::uuid, 'complete', 'portal', 1, 'FIX-BATCH-B');
+  insert into public.send_recipients (send_id, brand_id, contact_id, external_id, address)
+  values ('00000000-0000-4000-8000-0000000000a4', ba, (select id from public.contacts where brand_id = ba and external_id = 'CT-A1'), 'CT-A1', 'ct-a1@tenancy.test'),
+         ('00000000-0000-4000-8000-0000000000b4', bb, (select id from public.contacts where brand_id = bb and external_id = 'CT-B1'), 'CT-B1', 'ct-b1@tenancy.test');
+  insert into public.provider_batches (send_id, brand_id, batch_id)
+  values ('00000000-0000-4000-8000-0000000000a4', ba, 'FIX-BATCH-A'),
+         ('00000000-0000-4000-8000-0000000000b4', bb, 'FIX-BATCH-B');
 end $$;
 
 -- Supabase's documented RLS-test pattern: request.jwt.claims + role authenticated, transaction-local.
@@ -277,6 +293,14 @@ select is(other, 0::bigint, 'B8 other-brand rows = 0: ' || rel) from pg_temp.bra
 
 -- Story 3.1: shared tables (no brand_id, policy on auth.uid()) — readable by any signed-in user, exempt from B8.
 select cmp_ok((select count(*) from public.metric_rules), '>', 0::bigint, 'B10 shared table readable when signed in: public.metric_rules');
+
+-- Story 4.1: recipient_preview — brand A's campaign answers one reconciled row; brand B's campaign id (which
+-- exists — the secdef function bypasses RLS, so only its own brand check stands between A and B) → not_in_brand.
+select is((select count(*) from public.recipient_preview(current_setting('tenancy.campaign_a')::uuid)), 1::bigint, 'B11 recipient_preview answers one row for own campaign');
+select is((select total_count + not_contactable + no_address + country_mismatch_or_unknown from public.recipient_preview(current_setting('tenancy.campaign_a')::uuid)),
+          (select count(*) from public.contacts where deleted_at is null),
+          'B11 recipient_preview counts reconcile to own non-deleted contacts');
+select throws_ok(format($$ select * from public.recipient_preview(%L) $$, current_setting('tenancy.campaign_b')), 'P0001', 'not_in_brand', 'B12 recipient_preview refuses brand B''s campaign (not_in_brand)');
 
 select pg_temp.as_postgres();
 select is(current_user::text, 'postgres', 'B9 role restored to postgres before finish');
