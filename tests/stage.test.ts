@@ -211,6 +211,9 @@ describe("pnpm seed flags", () => {
     expect(parseArgs(["--only=import"])).toEqual({ only: "import" });
     expect(parseArgs(["--only=import", "--entity=contacts"])).toEqual({ only: "import", entity: "contacts" });
     expect(() => parseArgs(["--entity=users"])).toThrow(/--entity/);
-    expect(() => parseArgs(["--only=import", "--entity=campaigns"])).toThrow(/Story 2\.4/);
+    // Story 2.4: campaigns / events importers exist; the send log waits for Story 4.5
+    expect(parseArgs(["--only=import", "--entity=campaigns"])).toEqual({ only: "import", entity: "campaigns" });
+    expect(parseArgs(["--only=import", "--entity=events", "--file=marrakech-events.csv"])).toEqual({ only: "import", entity: "events", file: "marrakech-events.csv" });
+    expect(() => parseArgs(["--only=import", "--entity=send_log"])).toThrow(/Story 4\.5/);
   });
 });

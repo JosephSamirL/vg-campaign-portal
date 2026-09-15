@@ -26,13 +26,12 @@ type Relation = (typeof RELATIONS)[number];
 
 /**
  * Tables that are guaranteed to hold a KILELE row on the local stack. `brands`/`app_users`
- * are filled by the migrations + seed; Story 2.1's `contacts`/`campaigns`/`events` and Story 2.3's
- * `import_runs`/`import_issues`/`v_import_issue_groups` are empty until the seed files are loaded
- * (Story 2.4 moves them here once `pnpm seed` is the documented local setup). The own-brand > 0 proof
- * for them lives in the pgTAP suite's fixtures meanwhile; the anonymous refusal and the
- * "no foreign brand_id" checks below run for every table regardless.
+ * are filled by the migrations + seed.sql; `contacts`/`campaigns`/`events` and the import report
+ * (`import_runs`/`import_issues`/`v_import_issue_groups`) by `pnpm seed` — the documented local
+ * setup since Story 2.4 (README "Seed load counts"). The own-brand > 0 check therefore covers every
+ * relation; the anonymous refusal and the "no foreign brand_id" checks run regardless.
  */
-const SEEDED_TABLES: readonly Relation[] = ["brands", "app_users"];
+const SEEDED_TABLES: readonly Relation[] = ["brands", "app_users", "contacts", "campaigns", "events", "import_runs", "import_issues", "v_import_issue_groups"];
 
 const OWN_BRAND = "KILELE";
 const OTHER_BRANDS = ["KAROO", "MARRAKECH"];
