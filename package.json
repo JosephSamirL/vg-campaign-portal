@@ -9,6 +9,7 @@
     "test:db": "supabase test db",
     "seed": "tsx --conditions=react-server scripts/seed/index.ts",
     "schema:dump": "bash scripts/schema-dump.sh",
+    "check:functions": "bash scripts/check-functions.sh",
     "gen:types": "supabase gen types typescript --local > lib/database.types.ts.tmp && mv lib/database.types.ts.tmp lib/database.types.ts"
   },
   "dependencies": {

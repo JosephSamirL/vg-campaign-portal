@@ -99,11 +99,12 @@ describe.skipIf(!configured)("confirm_send: exactly once through PostgREST (KILE
       expect(row.batch_id).toBeNull(); // dispatch is Story 4.3
     }
 
-    // exactly one sends row for the campaign (the local seed holds no sends until Story 4.5)
+    // exactly one PORTAL send for the campaign (4.5's seed send-log rows may sit on the same campaign — 4.2 review [L])
     const { count, error } = await owner.supabase
       .from("sends")
       .select("*", { count: "exact", head: true })
-      .eq("campaign_id", campaign.id);
+      .eq("campaign_id", campaign.id)
+      .eq("source", "portal");
     expect(error).toBeNull();
     expect(count).toBe(1);
 
@@ -120,7 +121,7 @@ describe.skipIf(!configured)("confirm_send: exactly once through PostgREST (KILE
     const { data, error } = await owner.supabase.rpc("confirm_send", { p_campaign_id: campaign.id, p_expected_count: expectedCount });
     expect(error).toBeNull();
     expect(data?.id).toBe(sendId);
-    const { count } = await owner.supabase.from("sends").select("*", { count: "exact", head: true }).eq("campaign_id", campaign.id);
+    const { count } = await owner.supabase.from("sends").select("*", { count: "exact", head: true }).eq("campaign_id", campaign.id).eq("source", "portal");
     expect(count).toBe(1);
   });
 
@@ -144,7 +145,7 @@ describe.skipIf(!configured)("confirm_send: exactly once through PostgREST (KILE
     expect(data).toBeNull();
     expect(error?.code).toBe("P0001");
     expect(error?.message).toBe("not_owner");
-    const { count } = await analyst.supabase.from("sends").select("*", { count: "exact", head: true }).eq("campaign_id", campaign.id);
+    const { count } = await analyst.supabase.from("sends").select("*", { count: "exact", head: true }).eq("campaign_id", campaign.id).eq("source", "portal");
     expect(count).toBe(1); // still only the owner's send
   });
 
@@ -170,9 +171,12 @@ if (!configured) {
  * exactly one 202 (the lease), the other `{ skipped: true }`; the send reaches `reporting` with one
  * `provider_batches` row, and the mock saw exactly one distinct Idempotency-Key, `send-<id>`. A third call is
  * skipped; the KAROO owner gets 404 `not_in_brand` (RLS hides the send); the KILELE analyst 403 `not_owner`;
- * no auth 401; a bad cron secret 401. Then, on fresh sends: a provider 4xx → `failed` with the reason, and a
+ * no auth 401; a bad cron secret 401. Then, on fresh sends: a provider 4xx → `failed` with the sanitised reason, and a
  * provider 5xx → the send STAYS `dispatched` under its lease (no re-POST, a further call is skipped) — the
- * sweep's business, not this invocation's. Skipped loudly when the function is not served (fails under CI).
+ * sweep's business, not this invocation's. Crash recovery (4.3 review): a 200 whose body was lost leaves the send
+ * `dispatched` (never `failed`); once the lease is expired (service role) a re-invoke replays the SAME
+ * `Idempotency-Key`, the mock answers the stored batch_id (`replay: true`) and the send reaches `reporting` with
+ * attempts 2 and one distinct key. Skipped loudly when the function is not served (fails under CI).
  */
 const FUNCTIONS_URL = stack ? `${stack.url}/functions/v1/dispatch-send` : "";
 const MOCK_URL = process.env.PROVIDER_MOCK_URL ?? `http://127.0.0.1:${process.env.PROVIDER_MOCK_PORT ?? 8787}`;
@@ -299,7 +303,7 @@ describe.skipIf(!dispatchConfigured)("dispatch-send: exactly once through the Ed
   });
 
   afterAll(async () => {
-    await mockConfig({ status: null, reject_ids: [], latency_ms: 0 }).catch(() => undefined);
+    await mockConfig({ status: null, reject_ids: [], latency_ms: 0, blank_body: false }).catch(() => undefined);
     if (!service) return;
     for (const id of createdSends) {
       // teardown through the service role: cascade removes send_recipients + provider_batches
@@ -409,7 +413,10 @@ describe.skipIf(!dispatchConfigured)("dispatch-send: exactly once through the Ed
       expect(res.status).toBe(202);
       const { send } = await pollUntil(owner.supabase, fresh.sendId, ["reporting", "partial", "failed"]);
       expect(send.status).toBe("failed");
-      expect(send.failure_reason).toMatch(/^provider_422: /);
+      // sanitised: `provider_<status>: <first 120 chars, whitespace collapsed>` — never the raw body, never a newline
+      expect(send.failure_reason).toMatch(/^provider_422: \S/);
+      expect(send.failure_reason!.length).toBeLessThanOrEqual("provider_422: ".length + 121);
+      expect(send.failure_reason).not.toMatch(/[\r\n]/);
       expect(send.batch_id).toBeNull();
       expect(send.provider_responded_at).toBeTruthy();
       const { count } = await owner.supabase.from("provider_batches").select("*", { count: "exact", head: true }).eq("send_id", fresh.sendId);
@@ -452,6 +459,54 @@ describe.skipIf(!dispatchConfigured)("dispatch-send: exactly once through the Ed
       expect((await mockCalls()).length).toBe(before + 1);
     } finally {
       await mockConfig({ status: null });
+    }
+  });
+
+  it("crash recovery: a 200 with a lost body leaves the send dispatched; after the lease expires a re-invoke replays the same key and lands on the same batch_id", async () => {
+    const fresh = await confirmFreshSend(owner);
+    createdSends.push(fresh.sendId);
+    const before = (await mockCalls()).length;
+    await mockConfig({ blank_body: true });
+    try {
+      // attempt 1: the provider commits the batch, the response body never arrives → outcome unknown, NOT failed
+      const first = await invokeDispatch(fresh.sendId, ownerHeaders);
+      expect(first.status).toBe(202);
+      expect(first.body).toMatchObject({ dispatch_attempts: 1 });
+      const started = Date.now();
+      while ((await mockCalls()).length === before && Date.now() - started < POLL_LIMIT_MS) await new Promise((r) => setTimeout(r, POLL_MS));
+      await new Promise((r) => setTimeout(r, POLL_MS));
+      const stranded = await readSend(owner.supabase, fresh.sendId);
+      expect(stranded.status).toBe("dispatched");
+      expect(stranded.batch_id).toBeNull();
+      expect(stranded.failure_reason).toBeNull();
+      expect(stranded.dispatch_attempts).toBe(1);
+      expect((await mockCalls()).slice(before)).toMatchObject([{ key: `send-${fresh.sendId}`, status: 200, replay: false }]);
+      // the lease is live: a further call is skipped (nothing re-POSTed)
+      expect((await invokeDispatch(fresh.sendId, ownerHeaders)).body).toMatchObject({ skipped: true, reason: "lease_unavailable" });
+      expect((await mockCalls()).length).toBe(before + 1);
+
+      // the crash-recovery precondition: the 10-min lease has expired (fixture through the service role — the app cannot write sends)
+      await mockConfig({ blank_body: false });
+      const { error } = await service!.from("sends").update({ dispatch_lease_until: new Date(Date.now() - 1_000).toISOString() }).eq("id", fresh.sendId);
+      expect(error).toBeNull();
+
+      // attempt 2: same derived Idempotency-Key → the mock replays the stored batch → reporting, attempts 2
+      const second = await invokeDispatch(fresh.sendId, ownerHeaders);
+      expect(second.status).toBe(202);
+      expect(second.body).toMatchObject({ send_id: fresh.sendId, status: "dispatched", dispatch_attempts: 2 });
+      const { send } = await pollUntil(owner.supabase, fresh.sendId, ["reporting", "partial", "failed"]);
+      expect(send.status).toBe("reporting");
+      expect(send.dispatch_attempts).toBe(2);
+      expect(send.accepted_count).toBe(fresh.recipientCount);
+      const calls = (await mockCalls()).slice(before);
+      expect(calls).toHaveLength(2);
+      expect(new Set(calls.map((c) => c.key)).size).toBe(1);
+      expect(calls[1]).toMatchObject({ key: `send-${fresh.sendId}`, replay: true, batch_id: calls[0].batch_id });
+      expect(send.batch_id).toBe(calls[0].batch_id);
+      const { count } = await owner.supabase.from("provider_batches").select("*", { count: "exact", head: true }).eq("send_id", fresh.sendId);
+      expect(count).toBe(1);
+    } finally {
+      await mockConfig({ blank_body: false });
     }
   });
 });

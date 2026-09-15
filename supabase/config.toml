@@ -405,7 +405,7 @@ deno_version = 2
 # auth.getUser() + current_app_role() = owner) OR the pg_cron sweep's `x-cron-secret` (= secret CRON_SECRET).
 # verify_jwt is off because the sweep signs with a shared secret, not a JWT (`sb_secret_` keys are not JWTs).
 # Secrets (PROVIDER_BASE_URL, PROVIDER_API_KEY, CRON_SECRET): `supabase secrets set …` hosted; locally
-# `supabase functions serve dispatch-send --env-file supabase/.env.mock` (see README, "Dispatch").
+# `supabase functions serve dispatch-send --env-file supabase/mock.env` (see README, "Dispatch").
 [functions.dispatch-send]
 verify_jwt = false
 

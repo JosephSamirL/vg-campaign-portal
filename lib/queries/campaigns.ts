@@ -21,6 +21,13 @@ export type { MetricRule, Result };
 export type PerformanceRow = Database["public"]["Views"]["v_campaign_performance"]["Row"];
 export type CampaignRow = Database["public"]["Tables"]["campaigns"]["Row"];
 export type SendRow = Database["public"]["Tables"]["sends"]["Row"];
+/**
+ * A `sends` row for the history plus one server-computed flag: `lease_expired` is true when the send is stranded
+ * in `dispatched` with no `batch_id` and its `dispatch_lease_until` is in the past (a provider 5xx / timeout / lost
+ * response; the sweep is disabled, so the owner gets a Retry). Computed on the server clock so a client's skew can
+ * neither show nor hide it (4.4 review [M]).
+ */
+export type SendHistoryRow = SendRow & { lease_expired: boolean };
 export type ShareLinkRow = Database["public"]["Views"]["v_share_links"]["Row"];
 
 /**
@@ -107,14 +114,28 @@ export async function getRateRules(supabase: Supabase): Promise<Result<RateRules
 }
 
 /**
- * The campaign's sends, newest first (Story 4.4; 4.5 adds `seed_send_log` rows through the same
- * query). Plain `sends` rows through RLS — the page re-runs this on every poll tick, so the list
- * is always the server's read and never a client-side guess at a status.
+ * The campaign's sends, newest first by the send date (Story 4.4; 4.5's `seed_send_log` rows come through the
+ * same query): `confirmed_at desc nulls last, created_at desc` — a seed row is dated by its `confirmed_at` from
+ * the send log, not by the seed run that inserted it. Plain `sends` rows through RLS plus the server-computed
+ * `lease_expired` flag — the page re-runs this on every poll tick, so the list is always the server's read and
+ * never a client-side guess at a status.
  */
-export async function getCampaignSends(supabase: Supabase, campaignId: string): Promise<Result<SendRow[]>> {
-  const { data, error } = await supabase.from("sends").select("*").eq("campaign_id", campaignId).order("created_at", { ascending: false });
+export async function getCampaignSends(supabase: Supabase, campaignId: string, now: Date = new Date()): Promise<Result<SendHistoryRow[]>> {
+  const { data, error } = await supabase
+    .from("sends")
+    .select("*")
+    .eq("campaign_id", campaignId)
+    .order("confirmed_at", { ascending: false, nullsFirst: false })
+    .order("created_at", { ascending: false });
   if (error) return { ok: false, message: error.message };
-  return { ok: true, data: data ?? [] };
+  return { ok: true, data: (data ?? []).map((send) => ({ ...send, lease_expired: isLeaseExpired(send, now) })) };
+}
+
+/** Stranded in `dispatched`: no `batch_id` and the lease ran out — nothing else will move it while the sweep is off. */
+export function isLeaseExpired(send: Pick<SendRow, "status" | "batch_id" | "dispatch_lease_until">, now: Date): boolean {
+  if (send.status !== "dispatched" || send.batch_id !== null || send.dispatch_lease_until === null) return false;
+  const until = Date.parse(send.dispatch_lease_until);
+  return Number.isFinite(until) && until < now.getTime();
 }
 
 /**

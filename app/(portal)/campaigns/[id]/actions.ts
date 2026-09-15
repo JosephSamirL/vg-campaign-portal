@@ -84,6 +84,13 @@ export async function dispatchSendAction(input: unknown): Promise<ActionResult<D
 type InvokeOutcome = { dispatched: boolean; reason: string | null; refused: "not_owner" | "not_in_brand" | "invalid_input" | null };
 
 /**
+ * The function answers 202 right after the lease (well under a second); a HUNG function must not pin the owner in
+ * "Confirming…" behind a non-dismissible dialog. A timeout is just `invoke_failed`: the send is `confirmed` already
+ * and Retry / the sweep recover it (4.4 review [L]).
+ */
+const INVOKE_TIMEOUT_MS = 10_000;
+
+/**
  * `supabase.functions.invoke('dispatch-send', { body: { send_id } })` — the server client forwards
  * the session's access token, so the function loads the send through a user-scoped client (RLS
  * proves the brand, `current_app_role()` must be `owner`). Returns after the lease (202) or the
@@ -93,7 +100,10 @@ type InvokeOutcome = { dispatched: boolean; reason: string | null; refused: "not
 async function invokeDispatch(supabase: Supabase, sendId: string): Promise<InvokeOutcome> {
   const started = Date.now();
   try {
-    const { data, error } = await supabase.functions.invoke<Record<string, unknown>>("dispatch-send", { body: { send_id: sendId } });
+    const { data, error } = await supabase.functions.invoke<Record<string, unknown>>("dispatch-send", {
+      body: { send_id: sendId },
+      signal: AbortSignal.timeout(INVOKE_TIMEOUT_MS),
+    });
     if (error) {
       const body = await functionErrorBody(error);
       const code = typeof body?.code === "string" ? body.code : null;

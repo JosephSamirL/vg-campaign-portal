@@ -18,9 +18,12 @@ import { fileURLToPath } from "node:url";
  *                                       pages, never lost events).
  *   GET  /healthz                       {} (no auth), like the real one.
  *   POST /__mock/reset                  forget every batch, call and override.
- *   POST /__mock/config                 { status?, reject_ids?, latency_ms?, page_size? } — `status` forces the
- *                                       next POSTs to answer that code (e.g. 500 / 422) WITHOUT storing anything
- *                                       for the key (a failed call is not an idempotent success).
+ *   POST /__mock/config                 { status?, reject_ids?, latency_ms?, page_size?, blank_body? } — `status`
+ *                                       forces the next POSTs to answer that code (e.g. 500 / 422) WITHOUT storing
+ *                                       anything for the key (a failed call is not an idempotent success);
+ *                                       `blank_body` accepts and STORES the batch for the key but answers 200 with
+ *                                       an empty body — the "provider committed, the response was lost" crash drill
+ *                                       (a replay of the key then returns the stored batch_id).
  *   GET  /__mock/calls                  [{ key, batch_id, status }] — every POST /v1/messages seen, in order.
  *
  * `startProviderMock(port)` for Vitest's globalSetup (tests/global-setup.ts); standalone: `pnpm tsx
@@ -37,7 +40,7 @@ type StoredResponse = { status: number; body: unknown };
 
 type Batch = { batch_id: string; recipients: string[]; accepted: string[]; rejected: string[]; events: MockEvent[]; created_at: string };
 
-export type MockConfig = { status?: number | null; reject_ids?: string[]; latency_ms?: number; page_size?: number };
+export type MockConfig = { status?: number | null; reject_ids?: string[]; latency_ms?: number; page_size?: number; blank_body?: boolean };
 
 const DEFAULT_PAGE_SIZE = 1000;
 
@@ -50,7 +53,7 @@ export type ProviderMockState = {
 };
 
 export function freshState(): ProviderMockState {
-  return { byKey: new Map(), batches: new Map(), calls: [], config: { status: null, reject_ids: [], latency_ms: 0, page_size: DEFAULT_PAGE_SIZE }, counter: 0 };
+  return { byKey: new Map(), batches: new Map(), calls: [], config: { status: null, reject_ids: [], latency_ms: 0, page_size: DEFAULT_PAGE_SIZE, blank_body: false }, counter: 0 };
 }
 
 /** The provider keys a recipient on id / external_id / contact_id / recipient_id / email. */
@@ -180,6 +183,7 @@ export function createProviderMock(state: ProviderMockState = freshState()): { s
         if (Array.isArray(patch.reject_ids)) state.config.reject_ids = patch.reject_ids.filter((x): x is string => typeof x === "string");
         if (typeof patch.latency_ms === "number") state.config.latency_ms = Math.max(0, patch.latency_ms);
         if (typeof patch.page_size === "number") state.config.page_size = Math.min(DEFAULT_PAGE_SIZE, Math.max(1, Math.floor(patch.page_size)));
+        if (typeof patch.blank_body === "boolean") state.config.blank_body = patch.blank_body;
         return send(res, 200, state.config);
       }
       if (url.pathname === "/__mock/calls" && method === "GET") return send(res, 200, state.calls);
@@ -236,6 +240,11 @@ export function createProviderMock(state: ProviderMockState = freshState()): { s
         const body = { batch_id: batchId, accepted, rejected };
         if (key) state.byKey.set(key, { status: 200, body });
         state.calls.push({ key, batch_id: batchId, status: 200, recipients: ids.length, replay: false });
+        if (state.config.blank_body) {
+          // committed on the provider's side, response lost on the way back: 200 with nothing in it
+          res.writeHead(200, { "Content-Length": 0 });
+          return res.end();
+        }
         return send(res, 200, body);
       }
 

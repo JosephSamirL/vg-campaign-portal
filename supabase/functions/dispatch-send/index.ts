@@ -24,15 +24,27 @@
  *                    mismatch means the snapshot is not what was confirmed: failed / body_hash_mismatch, no POST
  *        post        POST /v1/messages with Idempotency-Key `send-<send_id>` (derived, never random: a replay
  *                    after a crash is the same request) and a 60 s timeout
- *        outcome     2xx → dispatch_record_result (accepted ∩ recipients, reporting | partial, provider_batches)
- *                    4xx → dispatch_mark_failed (failure_reason = status + body)
+ *        outcome     2xx with a batch_id → dispatch_record_result (accepted ∩ recipients, rejected ∩ recipients,
+ *                    reporting | partial, provider_batches)
+ *                    2xx with no batch_id / an unreadable or non-JSON body → OUTCOME UNKNOWN: the provider may have
+ *                    accepted the batch under this key, so the send stays `dispatched` (never `failed`); the next
+ *                    attempt replays the same Idempotency-Key and reads the same batch_id (4.3 review [M])
+ *                    4xx → dispatch_mark_failed (failure_reason = `provider_<status>: <first 120 chars, no newlines>`;
+ *                    the raw body is in the log line only)
  *                    5xx / timeout / network → nothing: the send stays `dispatched` under its lease; never
  *                    re-POST in this invocation — the sweep retries once the lease expires, and caps at 3
  *   Every transition is CAS on `status = 'dispatched' and batch_id is null` inside the SQL functions.
  *   One JSON log line per step: { fn, send_id, step, ok, ms }.
+ *
+ * The provider secrets are checked before the lease: a deploy without PROVIDER_BASE_URL / PROVIDER_API_KEY answers
+ * `500 misconfigured` and never consumes one of the three attempts. The paths that still need SQL — `partial`
+ * immediately when retries are off (`dispatch_mark_partial`), the attempt-cap reason, the 24-h age ceiling, a
+ * `batch_id` unique violation inside `dispatch_record_result` — are carried by Story 6.2's migration; until then
+ * an unknown outcome stays `dispatched` under its lease and the portal offers the owner a Retry once the lease has
+ * expired (4.4).
  */
 import { logStep, stopwatch } from "../_shared/log.ts";
-import { postMessages, recipientId, type Recipient } from "../_shared/provider.ts";
+import { failureReason, missingProviderEnv, postMessages, recipientId, type ProviderRecipientEcho, type Recipient } from "../_shared/provider.ts";
 import { serviceClient, userClient } from "../_shared/supabase.ts";
 
 const FN = "dispatch-send";
@@ -75,6 +87,16 @@ function secretEquals(given: string, expected: string): boolean {
 
 const SEND_COLUMNS = "id, status, batch_id, recipient_count, body_sha256, dispatch_attempts, campaigns(external_id), brands(code)";
 
+/** The provider's echo (`accepted` / `rejected`) normalised to ids and intersected with the snapshot: distinct ids the send actually carried. */
+function snapshotIds(echo: ProviderRecipientEcho[], snapshot: ReadonlySet<string>): string[] {
+  const seen = new Set<string>();
+  for (const item of echo) {
+    const id = recipientId(item);
+    if (id !== null && snapshot.has(id)) seen.add(id);
+  }
+  return [...seen];
+}
+
 /** The background half: recipients → hash check → POST → outcome. Never throws out (the response is already sent). */
 async function run(sendId: string, send: SendRow): Promise<void> {
   const service = serviceClient();
@@ -114,31 +136,40 @@ async function run(sendId: string, send: SendRow): Promise<void> {
     const batchId = typeof result.body.batch_id === "string" && result.body.batch_id ? result.body.batch_id : null;
     const accepted = Array.isArray(result.body.accepted) ? result.body.accepted : [];
     const rejected = Array.isArray(result.body.rejected) ? result.body.rejected : [];
-    logStep({ fn: FN, send_id: sendId, step: "post", ok: true, ms: postMs, status: result.status, batch_id: batchId, accepted: accepted.length, rejected: rejected.length });
     if (!batchId) {
-      // a 2xx without a batch_id cannot be polled: record the failure rather than pretend
-      t = stopwatch();
-      const { error } = await service.rpc("dispatch_mark_failed", { p_send_id: sendId, p_reason: `provider_${result.status}_no_batch_id: ${result.text}` });
-      logStep({ fn: FN, send_id: sendId, step: "mark_failed", ok: !error, ms: t(), reason: "no_batch_id", error: error?.message });
+      // a 2xx without a batch_id is an UNKNOWN outcome, not a failure: the provider may have accepted the batch under
+      // this key. Leave `dispatched`; the next attempt (lease expiry → Retry / sweep) replays the same Idempotency-Key.
+      logStep({ fn: FN, send_id: sendId, step: "post", ok: false, ms: postMs, status: result.status, outcome: "outcome_unknown", reason: "no_batch_id", body: result.text.slice(0, 500), left: "dispatched" });
       return;
     }
-    const acceptedIds = accepted.map(recipientId).filter((id): id is string => typeof id === "string");
+    // both echoes normalised the same way and intersected with the snapshot, so accepted + rejected ≤ recipient_count
+    const snapshot = new Set(recipients.map((r) => r.external_id));
+    const acceptedIds = snapshotIds(accepted, snapshot);
+    const rejectedIds = snapshotIds(rejected, snapshot);
+    logStep({ fn: FN, send_id: sendId, step: "post", ok: true, ms: postMs, status: result.status, batch_id: batchId, accepted: acceptedIds.length, rejected: rejectedIds.length, echoed_accepted: accepted.length, echoed_rejected: rejected.length });
     t = stopwatch();
     const { data, error } = await service.rpc("dispatch_record_result", {
       p_send_id: sendId,
       p_batch_id: batchId,
       p_accepted_ids: acceptedIds,
-      p_rejected_count: rejected.length,
+      p_rejected_count: rejectedIds.length,
     });
     const row = Array.isArray(data) && data.length > 0 ? (data[0] as { status: string; accepted_count: number }) : null;
     logStep({ fn: FN, send_id: sendId, step: "record_result", ok: !error, ms: t(), rows: Array.isArray(data) ? data.length : 0, status: row?.status, accepted_count: row?.accepted_count, error: error?.message });
     return;
   }
 
+  if (result.kind === "unreadable") {
+    // the status line said 2xx but the body never arrived / was not JSON: same unknown outcome as above
+    logStep({ fn: FN, send_id: sendId, step: "post", ok: false, ms: postMs, status: result.status, outcome: "outcome_unknown", reason: result.error, left: "dispatched" });
+    return;
+  }
+
   if (result.kind === "client_error") {
-    logStep({ fn: FN, send_id: sendId, step: "post", ok: false, ms: postMs, status: result.status });
+    // the raw body (which may echo recipient addresses) goes to the log only; the stored reason is sanitised
+    logStep({ fn: FN, send_id: sendId, step: "post", ok: false, ms: postMs, status: result.status, body: result.text.slice(0, 500) });
     t = stopwatch();
-    const { data, error } = await service.rpc("dispatch_mark_failed", { p_send_id: sendId, p_reason: `provider_${result.status}: ${result.text}` });
+    const { data, error } = await service.rpc("dispatch_mark_failed", { p_send_id: sendId, p_reason: failureReason(result.status, result.text) });
     logStep({ fn: FN, send_id: sendId, step: "mark_failed", ok: !error, ms: t(), reason: `provider_${result.status}`, rows: Array.isArray(data) ? data.length : 0, error: error?.message });
     return;
   }
@@ -220,6 +251,13 @@ async function handle(req: Request): Promise<Response> {
   // pre-check — only confirmed | dispatched with no batch_id is dispatchable
   if (send.batch_id !== null) return json(200, { skipped: true, reason: "batch_recorded", status: send.status });
   if (send.status !== "confirmed" && send.status !== "dispatched") return json(200, { skipped: true, reason: `status_${send.status}`, status: send.status });
+
+  // provider secrets — checked BEFORE the lease so a misconfigured deploy never consumes an attempt
+  const unset = missingProviderEnv();
+  if (unset.length > 0) {
+    logStep({ fn: FN, send_id: sendId, step: "config", ok: false, ms: 0, missing: unset });
+    return fail(500, "misconfigured", `provider secrets not set: ${unset.join(", ")}`);
+  }
 
   // lease — the CAS; zero rows = someone else holds it or the cap is reached
   t = stopwatch();

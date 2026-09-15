@@ -20,6 +20,9 @@ import { createClient } from "@/lib/supabase/server";
 
 const idSchema = z.uuid();
 
+/** Story 4.5 AC4: a send imported from the brand's send log carries a "from send log" badge; portal sends carry none. */
+const SEND_SOURCE_LABELS = { seed_send_log: "from send log" } as const;
+
 /**
  * `/campaigns/[id]` — one campaign with its reported figures, its sends (Story 4.4: the Send
  * button + confirm dialog for an owner, the history with its status poll for everyone; 4.5 adds
@@ -72,12 +75,21 @@ export default async function CampaignPage({ params }: { params: Promise<{ id: s
       <CampaignSection
         id="sends"
         title="Sends"
-        action={isOwner ? <SendConfirmDialog campaignId={campaign.data.id} campaignLabel={campaign.data.name ?? campaign.data.external_id} /> : null}
+        action={
+          isOwner ? (
+            <SendConfirmDialog
+              campaignId={campaign.data.id}
+              campaignLabel={campaign.data.name ?? campaign.data.external_id}
+              sends={sends.ok ? sends.data : []}
+              userEmail={me?.email ?? null}
+            />
+          ) : null
+        }
       >
         {!sends.ok ? (
           <RetryAlert title="Sends could not be loaded" message={sends.message} />
         ) : (
-          <SendHistory sends={sends.data} isOwner={isOwner} />
+          <SendHistory sends={sends.data} isOwner={isOwner} sourceLabels={SEND_SOURCE_LABELS} />
         )}
       </CampaignSection>
 

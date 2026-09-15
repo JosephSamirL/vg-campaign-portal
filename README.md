@@ -31,6 +31,7 @@ pnpm dev                     # http://localhost:3000
 | `pnpm seed` | Loads the seed data in one command (see *Seed load counts*): users → stage all eleven files → import contacts ×4 → campaigns ×3 → events ×3 → send log ×1 (Kilele, last), one `import_runs` row per file, one summary line per file, exit code 1 if any importer raises. Flags: `--only=users\|stage\|import\|all` (default `all`), `--sample=N`, `--file=<basename>`, `--entity=contacts\|campaigns\|events\|send_log` (import step); the stage and import steps need `DATABASE_URL` |
 | `pnpm schema:dump` | Regenerates `schema.sql` from `supabase/migrations/*.sql` |
 | `pnpm gen:types` | Regenerates `lib/database.types.ts` from the local database |
+| `pnpm check:functions` | `deno check` over `supabase/functions/*/index.ts` (the Edge Function sources are excluded from `tsc --noEmit`); skips with a note when `deno` is not on PATH |
 | `supabase db push` | Applies migrations to the hosted project |
 
 `schema.sql` at the repo root is the reproducible database definition: it is the concatenation of every migration, in order.

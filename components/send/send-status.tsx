@@ -41,10 +41,22 @@ export type SendStatusProps = {
 };
 
 /**
+ * `failure_reason` is stored as `<code>: <detail>` (`provider_422: …`, `body_hash_mismatch`). Only the code is
+ * rendered as text — the detail (a provider's error echo) goes into `title`, hover-only, never in the flow of the
+ * page an analyst reads (4.4 review [L]).
+ */
+export function failureReasonPrefix(reason: string): string {
+  const colon = reason.indexOf(":");
+  return (colon === -1 ? reason : reason.slice(0, colon)).trim();
+}
+
+/**
  * One send in the campaign's history (AC3): lifecycle badge, the three timestamps, the approver,
  * the recipient count, `batch_id`, accepted / rejected. `partial` reads "Partially sent — {accepted}
- * of {count} accepted"; `failed` shows `failure_reason`. Pure display of the `sends` row (RLS) — the
- * app never updates a send; status changes arrive through polling (SendHistory).
+ * of {count} accepted" when the provider answered, and "Partially sent — provider outcome unknown" when
+ * `accepted_count` is null (a capped / expired dispatch: nothing is fabricated for an unknown, FR-19);
+ * `failed` shows the `failure_reason` code. Pure display of the `sends` row (RLS) — the app never
+ * updates a send; status changes arrive through polling (SendHistory).
  */
 export function SendStatus({ send, sourceLabel, retry }: SendStatusProps) {
   return (
@@ -64,14 +76,27 @@ export function SendStatus({ send, sourceLabel, retry }: SendStatusProps) {
         {retry}
       </div>
 
-      {send.status === "partial" && (
+      {send.status === "partial" && send.accepted_count != null && (
         <p className="text-sm font-medium" data-testid="send-partial">
-          Partially sent — {formatInt(send.accepted_count ?? 0)} of {formatInt(send.recipient_count)} accepted
+          Partially sent — {formatInt(send.accepted_count)} of {formatInt(send.recipient_count)} accepted
+        </p>
+      )}
+      {send.status === "partial" && send.accepted_count == null && (
+        <p className="text-sm font-medium" data-testid="send-partial" data-outcome="unknown">
+          Partially sent — provider outcome unknown
+          {send.failure_reason && (
+            <>
+              {" "}
+              <span className="font-mono text-xs text-muted-foreground" title={send.failure_reason} data-testid="send-failure-reason">
+                ({failureReasonPrefix(send.failure_reason)})
+              </span>
+            </>
+          )}
         </p>
       )}
       {send.status === "failed" && (
-        <p className="break-words text-sm text-destructive" data-testid="send-failure-reason">
-          {send.failure_reason ?? "Failed — no reason was recorded"}
+        <p className="break-words text-sm text-destructive" data-testid="send-failure-reason" title={send.failure_reason ?? undefined}>
+          {send.failure_reason ? failureReasonPrefix(send.failure_reason) : "Failed — no reason was recorded"}
         </p>
       )}
 

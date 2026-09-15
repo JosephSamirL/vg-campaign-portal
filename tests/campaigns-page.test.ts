@@ -341,8 +341,14 @@ describe("/campaigns/[id]", () => {
     expect(html).toContain("Reported by the source");
     expect(html).toContain("119.16%");
     expect(html).toContain("12,679");
-    // the two slots and their empty sentences; the sends query is the story's exact shape (RLS, newest first)
-    expect(calls.sends).toEqual([["select", ["*"]], ["eq", ["campaign_id", KIL_0016]], ["order", ["created_at", { ascending: false }]]]);
+    // the two slots and their empty sentences; the sends query is the story's exact shape (RLS, newest send date first:
+    // `confirmed_at desc nulls last, created_at desc` — a seed send-log row is dated by the log, not by the seed run)
+    expect(calls.sends).toEqual([
+      ["select", ["*"]],
+      ["eq", ["campaign_id", KIL_0016]],
+      ["order", ["confirmed_at", { ascending: false, nullsFirst: false }]],
+      ["order", ["created_at", { ascending: false }]],
+    ]);
     expect(html).toContain('id="sends"');
     expect(html).toContain("No sends yet");
     // the share-links query is the story's exact shape (RLS through the security_invoker view, newest first)
@@ -439,6 +445,74 @@ describe("/campaigns/[id]", () => {
     expect(html).toContain("15 Sep 2026, 09:51 UTC");
     expect(html.indexOf('data-send-id="s2"')).toBeLessThan(html.indexOf('data-send-id="s1"'));
     expect(html).not.toContain("No sends yet");
+  });
+
+  it("badges a seed send-log row 'from send log' and keeps the server's order — the seed row dated by its log, the portal row after it (Story 4.5 AC4)", async () => {
+    responses.campaigns = { data: campaignRow, error: null };
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    // KIL-0016's real seed row: BATCH-0007, 9,800 recipients, sent 2026-03-17 (the seed run itself is 2026-09-15)
+    const seedRow = {
+      ...sendRow,
+      id: "seed-batch-0007",
+      status: "complete",
+      source: "seed_send_log",
+      batch_key: "BATCH-0007",
+      recipient_count: 9800,
+      confirmed_by: null,
+      confirmed_at: "2026-03-17T07:15:00+00:00",
+      dispatched_at: "2026-03-17T07:15:00+00:00",
+      created_at: "2026-09-15T08:00:00+00:00",
+    };
+    const portalRow = { ...sendRow, id: "portal-1", status: "reporting", batch_id: "mock-9", accepted_count: 50064, rejected_count: 0, confirmed_at: "2026-09-15T09:51:00+00:00" };
+    // the server (PostgREST) orders — the page renders as given
+    responses.sends = { data: [portalRow, seedRow], error: null };
+    const html = await renderDetail(KIL_0016);
+    expect(html).toContain('data-testid="send-source">from send log');
+    expect(html.match(/data-testid="send-source"/g)?.length).toBe(1); // the portal row carries no badge
+    expect(html).toContain('data-send-id="seed-batch-0007" data-status="complete"');
+    expect(html).toContain("9,800");
+    expect(html).toContain("17 Mar 2026, 07:15 UTC");
+    expect(html.indexOf('data-send-id="portal-1"')).toBeLessThan(html.indexOf('data-send-id="seed-batch-0007"'));
+    // the reported figures are untouched by the seed send: sent stays 10,640, the send log's 9,800 is nowhere in the rates
+    expect(html).toContain("10,640");
+    expect(html).toContain("96.00%");
+    expect(html).toContain('data-polling="true"'); // the portal row is still reporting
+  });
+
+  it("gives the owner a Retry under 'Waiting for the provider — lease expired' for a send the server flagged stranded in dispatched", async () => {
+    role = "owner";
+    responses.campaigns = { data: campaignRow, error: null };
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses.sends = {
+      data: [
+        { ...sendRow, id: "stranded", status: "dispatched", dispatched_at: "2026-09-15T09:51:03Z", dispatch_attempts: 1, dispatch_lease_until: "2026-09-01T10:01:03Z" },
+        { ...sendRow, id: "leased", status: "dispatched", dispatched_at: "2026-09-15T09:51:03Z", dispatch_attempts: 1, dispatch_lease_until: "2999-01-01T00:00:00Z" },
+      ],
+      error: null,
+    };
+    const html = await renderDetail(KIL_0016);
+    expect(html.match(/data-testid="dispatch-retry"/g)?.length).toBe(1);
+    expect(html).toMatch(/data-send-id="stranded"[\s\S]*?Waiting for the provider — lease expired[\s\S]*?data-send-id="leased"/);
+    expect(html).not.toContain("Dispatch didn&#x27;t start");
+
+    // an analyst sees the same rows and no Retry at all (UI hides, the function refuses anyway)
+    role = "analyst";
+    responses.campaigns = { data: campaignRow, error: null };
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses.sends = { data: [{ ...sendRow, id: "stranded", status: "dispatched", dispatch_lease_until: "2026-09-01T10:01:03Z" }], error: null };
+    expect(await renderDetail(KIL_0016)).not.toContain("dispatch-retry");
+  });
+
+  it("hands the owner's dialog the campaign's sends: prior sends listed, Send disabled while one is non-terminal", async () => {
+    role = "owner";
+    responses.campaigns = { data: campaignRow, error: null };
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses.sends = { data: [{ ...sendRow, id: "live", status: "reporting", batch_id: "mock-1" }], error: null };
+    const html = await renderDetail(KIL_0016);
+    expect(html).toContain('data-testid="send-dialog-prior"');
+    expect(html).toContain('data-testid="send-dialog-prior-row" data-send-id="live" data-status="reporting"');
+    expect(html).toContain('data-code="send_in_progress"');
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*data-testid="send-confirm"/);
   });
 
   it("renders the sends alert (header, figures and share links intact) when the sends query fails", async () => {

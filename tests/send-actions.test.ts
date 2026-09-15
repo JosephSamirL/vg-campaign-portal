@@ -72,9 +72,13 @@ if (!configured) {
   process.stderr.write(`\n${"=".repeat(88)}\nSKIPPED: ${message}\n${"=".repeat(88)}\n\n`);
 }
 
-/** The first email/sms campaign (by external_id) whose preview is > 0 — no send is created here, so an active send does not matter. */
+/**
+ * The LAST email/sms campaign (by external_id) whose preview is > 0 — no send is created here, so an active send does
+ * not matter. Descending on purpose: Vitest runs files in parallel and `tests/send-concurrency.test.ts` confirms real
+ * sends on the FIRST eligible campaigns, so the two suites must never count the same campaign's sends.
+ */
 async function pickCampaign(client: TestClient): Promise<{ id: string; total: number }> {
-  const { data: campaigns, error } = await client.from("campaigns").select("id, external_id").in("channel", ["email", "sms"]).order("external_id");
+  const { data: campaigns, error } = await client.from("campaigns").select("id, external_id").in("channel", ["email", "sms"]).order("external_id", { ascending: false });
   if (error) throw new Error(`campaigns: ${error.message}`);
   for (const campaign of campaigns ?? []) {
     const { data, error: previewError } = await client.rpc("recipient_preview", { p_campaign_id: campaign.id }).single();

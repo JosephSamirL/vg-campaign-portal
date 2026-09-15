@@ -23,9 +23,9 @@ vi.mock("@/app/(portal)/campaigns/[id]/actions", () => ({
 }));
 
 const { SendPreview } = await import("../components/send/send-preview");
-const { SendStatus, SendStatusBadge, isTerminal } = await import("../components/send/send-status");
-const { SendHistory, POLL_INTERVAL_MS, STUCK_AFTER_MS } = await import("../components/campaigns/send-history");
-const { SendConfirmDialog } = await import("../components/send/send-confirm-dialog");
+const { SendStatus, SendStatusBadge, isTerminal, failureReasonPrefix } = await import("../components/send/send-status");
+const { SendHistory, LEASE_EXPIRED_LABEL, POLL_BACKOFF_AFTER_MS, POLL_INTERVAL_MS, POLL_SLOW_INTERVAL_MS, POLL_STOP_AFTER_MS, STUCK_AFTER_MS } = await import("../components/campaigns/send-history");
+const { SendConfirmDialog, isExistingSend, FRESH_SEND_MAX_AGE_MS } = await import("../components/send/send-confirm-dialog");
 
 type SendRow = Tables<"sends">;
 
@@ -122,12 +122,31 @@ describe("SendStatus", () => {
     expect(html).toContain("Partially sent — 49,000 of 50,064 accepted");
   });
 
-  it("failed shows failure_reason; null counts and timestamps are dashes, never 0 or Invalid Date", () => {
-    const html = renderToStaticMarkup(createElement(SendStatus, { send: { ...base, status: "failed", failure_reason: "provider_422: empty recipients" } }));
-    expect(html).toContain('data-testid="send-failure-reason">provider_422: empty recipients');
+  it("partial with a null accepted_count reads 'provider outcome unknown' — never '0 of N' (FR-19)", () => {
+    const html = renderToStaticMarkup(createElement(SendStatus, { send: { ...base, status: "partial", accepted_count: null, rejected_count: null, failure_reason: "dispatch_outcome_unknown_after_3_attempts" } }));
+    expect(html).toContain('data-testid="send-partial" data-outcome="unknown"');
+    expect(html).toContain("Partially sent — provider outcome unknown");
+    expect(html).toContain("(dispatch_outcome_unknown_after_3_attempts)");
+    expect(html).not.toContain("0 of 50,064");
+    expect(html).not.toContain(" of 50,064 accepted");
+    expect(html).toMatch(/data-testid="send-counts">— \/ —</);
+    // and without a reason: the sentence alone
+    const bare = renderToStaticMarkup(createElement(SendStatus, { send: { ...base, status: "partial", accepted_count: null } }));
+    expect(bare).toContain("Partially sent — provider outcome unknown");
+    expect(bare).not.toContain("send-failure-reason");
+  });
+
+  it("failed shows only the failure_reason code as text, the detail in title; null counts and timestamps are dashes, never 0 or Invalid Date", () => {
+    const html = renderToStaticMarkup(createElement(SendStatus, { send: { ...base, status: "failed", failure_reason: "provider_422: empty recipients for bob@example.com" } }));
+    expect(html).toMatch(/data-testid="send-failure-reason"[^>]*title="provider_422: empty recipients for bob@example.com"[^>]*>provider_422</);
+    expect(html).not.toContain(">provider_422: empty");
     expect(html).toContain("Failed");
     expect(html).toMatch(/data-testid="send-counts">— \/ —</);
     expect(html).not.toContain("Invalid Date");
+    expect(failureReasonPrefix("provider_422: x: y")).toBe("provider_422");
+    expect(failureReasonPrefix("body_hash_mismatch")).toBe("body_hash_mismatch");
+    const noReason = renderToStaticMarkup(createElement(SendStatus, { send: { ...base, status: "failed" } }));
+    expect(noReason).toContain("Failed — no reason was recorded");
   });
 
   it("renders the source badge only when a label is given (Story 4.5's slot) and the retry slot when given", () => {
@@ -169,6 +188,24 @@ describe("SendHistory", () => {
     expect(html).not.toContain("dispatch-retry");
     expect(POLL_INTERVAL_MS).toBe(3000);
     expect(STUCK_AFTER_MS).toBe(30000);
+    // backoff: 3 s for the first minute, 10 s after, stop after 10 min (4.4 review [L])
+    expect(POLL_BACKOFF_AFTER_MS).toBe(60_000);
+    expect(POLL_SLOW_INTERVAL_MS).toBe(10_000);
+    expect(POLL_STOP_AFTER_MS).toBe(600_000);
+    expect(html).not.toContain("send-history-stale");
+  });
+
+  it("renders the owner's Retry under the lease-expired label for a row the server flagged `lease_expired` — and never for an analyst", () => {
+    const stranded = { ...base, id: "a4", status: "dispatched" as const, dispatched_at: "2026-09-15T09:51:03Z", dispatch_lease_until: "2026-09-15T10:01:03Z", lease_expired: true };
+    const live = { ...base, id: "a5", status: "dispatched" as const, dispatch_lease_until: "2999-01-01T00:00:00Z", lease_expired: false };
+    const owner = renderToStaticMarkup(createElement(SendHistory, { sends: [stranded, live], isOwner: true }));
+    expect(owner.match(/data-testid="dispatch-retry"/g)?.length).toBe(1);
+    expect(owner).toContain(`data-testid="dispatch-retry-label">${LEASE_EXPIRED_LABEL}<`);
+    expect(LEASE_EXPIRED_LABEL).toBe("Waiting for the provider — lease expired");
+    expect(owner).toMatch(/data-send-id="a4"[\s\S]*?dispatch-retry[\s\S]*?data-send-id="a5"/);
+    expect(owner).toContain('data-polling="true"');
+    const analyst = renderToStaticMarkup(createElement(SendHistory, { sends: [stranded, live], isOwner: false }));
+    expect(analyst).not.toContain("dispatch-retry");
   });
 
   it("does not poll when every row is terminal, and passes the source label through", () => {
@@ -190,5 +227,42 @@ describe("SendConfirmDialog", () => {
     // the confirm button is disabled until the preview is in
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*data-testid="send-confirm"/);
     expect(html).not.toContain("send-preview-total");
+    expect(html).not.toContain("send-dialog-prior");
+    expect(html).not.toContain("send_in_progress");
+  });
+
+  it("lists prior sends (status, date, count) and flags an in-progress one; terminal-only history shows no in-progress alert", () => {
+    const sends: SendRow[] = [
+      { ...base, id: "p2", status: "dispatched", confirmed_at: "2026-09-15T12:00:00Z" },
+      { ...base, id: "p1", status: "complete", recipient_count: 9800, confirmed_at: "2026-03-17T07:15:00Z", source: "seed_send_log" },
+    ];
+    const html = renderToStaticMarkup(createElement(SendConfirmDialog, { campaignId: "c", campaignLabel: "Nairobi launch", sends }));
+    expect(html).toContain('data-testid="send-dialog-prior"');
+    expect(html).toContain("Prior sends");
+    expect(html).toContain('data-testid="send-dialog-prior-row" data-send-id="p2" data-status="dispatched"');
+    expect(html).toContain('data-testid="send-dialog-prior-row" data-send-id="p1" data-status="complete"');
+    expect(html).toContain("15 Sep 2026, 12:00 UTC");
+    expect(html).toContain("17 Mar 2026, 07:15 UTC");
+    expect(html).toContain("9,800</span> recipients");
+    expect(html).toContain('data-code="send_in_progress"');
+    expect(html).toContain("A send is already in progress");
+
+    const settled = renderToStaticMarkup(createElement(SendConfirmDialog, { campaignId: "c", campaignLabel: "Nairobi launch", sends: [sends[1]] }));
+    expect(settled).toContain('data-testid="send-dialog-prior-row" data-send-id="p1"');
+    expect(settled).not.toContain("send_in_progress");
+  });
+
+  it("tells a returned EXISTING send from a fresh insert (4.2 AC2's loser path)", () => {
+    const now = Date.parse("2026-09-15T12:00:30Z");
+    const fresh: SendRow = { ...base, id: "new", confirmed_by: "me@vg-eval.test", recipient_count: 100, created_at: "2026-09-15T12:00:29Z" };
+    const args = { knownIds: new Set(["old"]), userEmail: "me@vg-eval.test", expectedCount: 100, now };
+    expect(isExistingSend(fresh, args)).toBe(false);
+    expect(isExistingSend({ ...fresh, id: "old" }, args)).toBe(true); // already listed on the page
+    expect(isExistingSend({ ...fresh, confirmed_by: "other.owner@vg-eval.test" }, args)).toBe(true); // another owner's
+    expect(isExistingSend({ ...fresh, recipient_count: 99 }, args)).toBe(true); // a different count than confirmed
+    expect(isExistingSend({ ...fresh, created_at: "2026-09-15T11:58:00Z" }, args)).toBe(true); // older than a fresh insert
+    expect(FRESH_SEND_MAX_AGE_MS).toBe(60_000);
+    // no user email known: the other three signals still decide
+    expect(isExistingSend(fresh, { ...args, userEmail: null })).toBe(false);
   });
 });

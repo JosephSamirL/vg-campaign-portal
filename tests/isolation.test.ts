@@ -25,7 +25,7 @@ export const TABLES = [
   "import_runs",
   "import_issues",
   "metric_rules", // Story 3.1: shared (no brand_id) — readable when signed in, refused anonymously
-  "sends", // Story 4.1: send records — SELECT only through PostgREST; empty locally until 4.2 confirms / 4.5 imports
+  "sends", // Story 4.1: send records — SELECT only through PostgREST; 4.5's seed send log fills it locally
   "send_recipients",
   "provider_batches",
 ] as const satisfies readonly (keyof Database["public"]["Tables"])[];
@@ -54,8 +54,9 @@ type Relation = (typeof RELATIONS)[number];
  * setup since Story 2.4 (README "Seed load counts"); `metric_rules` and the metrics views (Story 3.1)
  * are filled by the migration / derived from the seeded tables. The own-brand > 0 check therefore
  * covers every relation; the anonymous refusal and the "no foreign brand_id" checks run regardless.
- * Story 4.1's `sends` / `send_recipients` / `provider_batches` are NOT listed: nothing writes them until
- * Story 4.2 (confirm) / 4.5 (seed send log) — own-brand > 0 for them is proven by the pgTAP fixtures meanwhile.
+ * `sends` is seeded since Story 4.5 (`pnpm seed` loads Kilele's send log: 7 `seed_send_log` rows, amendment
+ * S15); `send_recipients` / `provider_batches` are NOT listed — only a portal send writes them (4.2 / 4.3) and
+ * every test send is deleted again — own-brand > 0 for those two is proven by the pgTAP fixtures.
  */
 const SEEDED_TABLES: readonly Relation[] = [
   "brands",
@@ -71,6 +72,7 @@ const SEEDED_TABLES: readonly Relation[] = [
   "v_signups_30d",
   "v_campaign_performance",
   "v_contacts",
+  "sends", // Story 4.5: the seed send log — 7 KILELE rows after `pnpm seed`
 ];
 
 const OWN_BRAND = "KILELE";

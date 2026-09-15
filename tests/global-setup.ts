@@ -3,7 +3,7 @@ import { startProviderMock, type RunningMock } from "./provider-mock";
 
 /**
  * Story 4.3 — Vitest globalSetup: start the provider mock once for the whole run on PROVIDER_MOCK_PORT (8787),
- * where a locally served `dispatch-send` (`supabase functions serve … --env-file supabase/.env.mock`, whose
+ * where a locally served `dispatch-send` (`supabase functions serve … --env-file supabase/mock.env`, whose
  * PROVIDER_BASE_URL is http://host.docker.internal:8787) reaches it. If something already listens there — a
  * standalone `pnpm tsx tests/provider-mock.ts` kept up while developing — that one is used instead.
  * Runs in Vitest's main process, so the server outlives every worker; torn down at the end of the run.
