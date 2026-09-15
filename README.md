@@ -28,7 +28,7 @@ pnpm dev                     # http://localhost:3000
 |---|---|
 | `pnpm test` | Vitest (`tests/**/*.test.ts`) against the local stack — `tests/isolation.test.ts` needs `.env.test` (below) |
 | `pnpm test:db` | pgTAP suites in `supabase/tests/` |
-| `pnpm seed` | Loads the seed data (see *Seed load counts*) |
+| `pnpm seed` | Loads the seed data (see *Seed load counts*): `--only=users\|stage\|all` (default `all`), `--sample=N`, `--file=<basename>`; the stage step needs `DATABASE_URL` |
 | `pnpm schema:dump` | Regenerates `schema.sql` from `supabase/migrations/*.sql` |
 | `pnpm gen:types` | Regenerates `lib/database.types.ts` from the local database |
 | `supabase db push` | Applies migrations to the hosted project |
@@ -135,7 +135,63 @@ _Grows with every attack test that lands._
 
 ## Seed load counts
 
-_Filled in after the seed load._
+`pnpm seed --only=stage` reads the eleven files in `docs/data/` through the per-file dialects in `scripts/seed/dialects.ts` (delimiter, encoding, header map, decimal-comma columns, hard-coded `as_of` / `file_rank`) and COPYs them into `staging.stage_*` over `DATABASE_URL` — the Supavisor **session** pooler (port 5432) for the hosted project, `postgresql://postgres:postgres@127.0.0.1:54322/postgres` against `supabase start`. TypeScript only *parses* (BOM, NUL bytes, RFC-4180 quoting, trim, reorder into canonical column order, `221,09` → `221.09`); every keep/reject rule is SQL (Stories 2.3/2.4). One staging row per CSV **record** (a quoted `notes` spanning two lines is one row, `row_no` = its first line), blank lines skipped, ragged records kept with their `ncols`, NULs stripped and flagged `had_nul`, the repeated header at Kilele line 40007 staged as an ordinary record. Re-staging a file deletes that file's rows first (never `truncate`), with a fresh `run_id` per file.
+
+### Smoke (`pnpm seed --only=stage --sample=10`)
+
+Run 2026-09-15 against the **local** stack (`DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres`). **Hosted COPY smoke pending: needs DB password** — the linked session-pooler URL is `postgresql://postgres.qaocabdpaxetofqcfgsa@aws-1-eu-west-1.pooler.supabase.com:5432/postgres`; put it (with the password) in `.env.local` as `DATABASE_URL` and re-run the same command; the table below is what it prints (files with fewer than 10 records stage all of them).
+
+```
+table            source_file                           count  min_ncols  max_ncols  had_nul
+---------------  ------------------------------------  -----  ---------  ---------  -------
+stage_contacts   karoo-contacts.csv                       10         13         13        0
+stage_contacts   kilele-contacts-delta-2026-09-01.csv     10         13         13        0
+stage_contacts   kilele-contacts.csv                      10         13         13        0
+stage_contacts   marrakech-contacts.csv                   10         13         13        0
+stage_campaigns  karoo-campaigns.csv                      10         13         13        0
+stage_campaigns  kilele-campaigns.csv                     10         13         13        0
+stage_campaigns  marrakech-campaigns.csv                   6         13         13        0
+stage_events     karoo-events.csv                         10          6          6        0
+stage_events     kilele-events.csv                        10          6          6        0
+stage_events     marrakech-events.csv                     10          6          6        0
+stage_send_log   kilele-send-log.csv                       9          5          5        0
+```
+
+### Full staging (local, 2026-09-15)
+
+`pnpm seed --only=stage` — 489,192 rows in ~5 s. Parse summary and verification query as printed:
+
+```
+file                                  records  staged  blank_lines  ragged  had_nul  multi_line
+------------------------------------  -------  ------  -----------  ------  -------  ----------
+kilele-contacts.csv                     83993   83993            7      70        3          12
+kilele-contacts-delta-2026-09-01.csv     4180    4180            0       0        0           0
+karoo-contacts.csv                      13042   13042            8      46        0           0
+marrakech-contacts.csv                    957     957            3      15        0           0
+kilele-campaigns.csv                       46      46            0       0        0           0
+karoo-campaigns.csv                        19      19            0       0        0           0
+marrakech-campaigns.csv                     6       6            0       0        0           0
+kilele-events.csv                      312000  312000            0       0        0           0
+karoo-events.csv                        74000   74000            0       0        0           0
+marrakech-events.csv                      940     940            0       0        0           0
+kilele-send-log.csv                         9       9            0       0        0           0
+
+table            source_file                           count   min_ncols  max_ncols  had_nul
+---------------  ------------------------------------  ------  ---------  ---------  -------
+stage_contacts   karoo-contacts.csv                     13042          7         13        0
+stage_contacts   kilele-contacts-delta-2026-09-01.csv    4180         13         13        0
+stage_contacts   kilele-contacts.csv                    83993          7         13        3
+stage_contacts   marrakech-contacts.csv                   957          7         13        0
+stage_campaigns  karoo-campaigns.csv                       19         13         13        0
+stage_campaigns  kilele-campaigns.csv                      46         13         13        0
+stage_campaigns  marrakech-campaigns.csv                    6         13         13        0
+stage_events     karoo-events.csv                       74000          6          6        0
+stage_events     kilele-events.csv                     312000          6          6        0
+stage_events     marrakech-events.csv                     940          6          6        0
+stage_send_log   kilele-send-log.csv                        9          5          5        0
+```
+
+Spot checks on `stage_contacts` (`kilele-contacts.csv`): `where had_nul` → `row_no` 5495, 23776, 61367 and no `\0` survives in any cell; `where cols[1] = 'external_id'` → 40007; `ncols` histogram 13: 83,923 / 9: 51 / 7: 19; `cols[13] where row_no = 750` = `VIP customer⏎follow up next quarter`; `=IMPORTXML(1,1)` staged verbatim. `karoo-contacts.csv`: `Ann–Marie Botha` decoded from windows-1252 `0x96`, 13-column rows in canonical order, ragged rows in raw order. `marrakech-campaigns.csv` `spend` `221,09` → `221.09`; the delta file carries `as_of 2026-09-01 / file_rank 20`, everything else `2026-08-01 / 10`. Re-staging `marrakech-contacts.csv` alone left the other files' rows untouched and replaced its 957 rows under a new `run_id`. The import counts (kept / rejected / warned) land here with Story 2.4.
 
 ## Table / function inventory
 
