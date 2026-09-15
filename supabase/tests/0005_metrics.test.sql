@@ -58,8 +58,8 @@ select columns_are('public', 'v_signups_30d', array['brand_id', 'day', 'signups'
 select columns_are('public', 'v_campaign_performance',
   array['brand_id', 'campaign_id', 'external_id', 'name', 'channel', 'sent_at', 'spend', 'target_country', 'source', 'send_id',
         'sent', 'delivered', 'bounced', 'opens', 'clicks', 'unsubscribes',
-        'delivered_rate', 'bounce_rate', 'open_rate', 'click_rate', 'unsubscribe_rate'],
-  'T22 v_campaign_performance columns (stable for Story 6.2''s portal rows)');
+        'delivered_rate', 'bounce_rate', 'open_rate', 'click_rate', 'unsubscribe_rate', 'dispatched_at'],
+  'T22 v_campaign_performance columns (Story 3.1''s list + dispatched_at appended by Story 6.2''s portal rows)');
 select columns_are('public', 'v_contacts',
   array['id', 'brand_id', 'external_id', 'full_name', 'email', 'phone', 'country', 'city', 'status', 'consent_marketing',
         'signup_at', 'suppressed_at', 'suppressed_reason', 'suppressed_until', 'contactable'],

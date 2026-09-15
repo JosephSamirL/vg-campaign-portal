@@ -255,11 +255,13 @@ select is((select row(brand_id, source, type, contact_id, campaign_id, channel, 
 select is((select raw from pg_temp.event('E-1')), jsonb_build_object('cols', array['E-1', 'CA', 'K1', 'complaint', 'Email ', '2026-03-02T08:00:00.123456Z']), 'E11 raw = {"cols": [...]}');
 select is(pg_temp.reasons('00000000-0000-4000-8000-0000000000e1', 'warn', 7), null, 'E12 a clean row has no warning');
 
--- follows a routed contact
-select is((select row(brand_id, contact_id, campaign_id)::text from pg_temp.event('E-R')),
+-- follows a routed contact — Story 6.2 / S19: stored under the source-qualified id KILELE:E-R (seed ids overlap across
+-- brands, so the bare id collided with KAROO's own E-R); its unresolved pointer is campaign_not_followed, not unknown_campaign.
+select is((select row(brand_id, contact_id, campaign_id)::text from pg_temp.event('KILELE:E-R')),
   row(pg_temp.brand('KAROO'), (select id from public.contacts where brand_id = pg_temp.brand('KAROO') and external_id = 'CR'), null::uuid)::text,
-  'E13 E-R stored under KAROO with the routed contact; campaign_id null (never a cross-brand pointer)');
-select is(pg_temp.reasons('00000000-0000-4000-8000-0000000000e1', 'warn', 6), 'event_follows_routed_contact,unknown_campaign', 'E14 E-R → event_follows_routed_contact + unknown_campaign');
+  'E13 E-R stored under KAROO as KILELE:E-R with the routed contact; campaign_id null (never a cross-brand pointer)');
+select is((select count(*) from public.events where source = 'seed' and event_id = 'E-R'), 0::bigint, 'E13 ... and not under the bare id');
+select is(pg_temp.reasons('00000000-0000-4000-8000-0000000000e1', 'warn', 6), 'campaign_not_followed,event_follows_routed_contact', 'E14 E-R → event_follows_routed_contact + campaign_not_followed (S19)');
 select is((select detail from public.import_issues where run_id = '00000000-0000-4000-8000-0000000000e1' and row_no = 6 and reason = 'event_follows_routed_contact'), '{"to": "KAROO"}'::jsonb, 'E15 follow detail names the brand');
 select is((select brand_id from public.import_issues where run_id = '00000000-0000-4000-8000-0000000000e1' and row_no = 6 and reason = 'event_follows_routed_contact'), pg_temp.brand('KILELE'), 'E16 the issue stays in the source brand');
 
@@ -294,7 +296,7 @@ select is((select s from t_e2) - 'inserted' - 'unchanged' - 'already_present', (
 select is((select s->'inserted' from t_e2), '0'::jsonb, 'E36 second run: inserted 0');
 select is((select s->'already_present' from t_e2), '8'::jsonb, 'E37 second run: already_present = candidates');
 select is((select s->'unchanged' from t_e2), '8'::jsonb, 'E38 second run: unchanged = already_present');
-select is((select count(*) from public.events where source = 'seed' and event_id like 'E-%'), 8::bigint, 'E39 second run added no rows');
+select is((select count(*) from public.events where source = 'seed' and (event_id like 'E-%' or event_id like 'KILELE:E-%')), 8::bigint, 'E39 second run added no rows');
 create temp table t_e2b as select internal.import_events('00000000-0000-4000-8000-0000000000e2') as s;
 select is((select s from t_e2b), (select s from t_e2), 'E40 re-running the same run_id → identical summary');
 select is((select count(*) from public.import_runs where id = '00000000-0000-4000-8000-0000000000e2'), 1::bigint, 'E41 still one import_runs row');

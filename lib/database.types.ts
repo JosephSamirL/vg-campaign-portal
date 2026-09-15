@@ -177,13 +177,6 @@ export type Database = {
             referencedRelation: "campaigns"
             referencedColumns: ["id"]
           },
-          {
-            foreignKeyName: "campaigns_parent_campaign_id_fkey"
-            columns: ["parent_campaign_id"]
-            isOneToOne: false
-            referencedRelation: "v_campaign_performance"
-            referencedColumns: ["campaign_id"]
-          },
         ]
       }
       contacts: {
@@ -340,13 +333,6 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "campaigns"
             referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "events_campaign_id_fkey"
-            columns: ["campaign_id"]
-            isOneToOne: false
-            referencedRelation: "v_campaign_performance"
-            referencedColumns: ["campaign_id"]
           },
           {
             foreignKeyName: "events_contact_id_fkey"
@@ -692,13 +678,6 @@ export type Database = {
             referencedRelation: "campaigns"
             referencedColumns: ["id"]
           },
-          {
-            foreignKeyName: "sends_campaign_id_fkey"
-            columns: ["campaign_id"]
-            isOneToOne: false
-            referencedRelation: "v_campaign_performance"
-            referencedColumns: ["campaign_id"]
-          },
         ]
       }
       share_links: {
@@ -757,13 +736,6 @@ export type Database = {
             referencedRelation: "campaigns"
             referencedColumns: ["id"]
           },
-          {
-            foreignKeyName: "share_links_campaign_id_fkey"
-            columns: ["campaign_id"]
-            isOneToOne: false
-            referencedRelation: "v_campaign_performance"
-            referencedColumns: ["campaign_id"]
-          },
         ]
       }
     }
@@ -779,6 +751,7 @@ export type Database = {
           clicks: number | null
           delivered: number | null
           delivered_rate: number | null
+          dispatched_at: string | null
           external_id: string | null
           name: string | null
           open_rate: number | null
@@ -792,68 +765,7 @@ export type Database = {
           unsubscribe_rate: number | null
           unsubscribes: number | null
         }
-        Insert: {
-          bounce_rate?: never
-          bounced?: number | null
-          brand_id?: string | null
-          campaign_id?: string | null
-          channel?: string | null
-          click_rate?: never
-          clicks?: number | null
-          delivered?: number | null
-          delivered_rate?: never
-          external_id?: string | null
-          name?: string | null
-          open_rate?: never
-          opens?: number | null
-          send_id?: never
-          sent?: number | null
-          sent_at?: string | null
-          source?: never
-          spend?: number | null
-          target_country?: string | null
-          unsubscribe_rate?: never
-          unsubscribes?: never
-        }
-        Update: {
-          bounce_rate?: never
-          bounced?: number | null
-          brand_id?: string | null
-          campaign_id?: string | null
-          channel?: string | null
-          click_rate?: never
-          clicks?: number | null
-          delivered?: number | null
-          delivered_rate?: never
-          external_id?: string | null
-          name?: string | null
-          open_rate?: never
-          opens?: number | null
-          send_id?: never
-          sent?: number | null
-          sent_at?: string | null
-          source?: never
-          spend?: number | null
-          target_country?: string | null
-          unsubscribe_rate?: never
-          unsubscribes?: never
-        }
-        Relationships: [
-          {
-            foreignKeyName: "campaigns_brand_id_fkey"
-            columns: ["brand_id"]
-            isOneToOne: false
-            referencedRelation: "brands"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "campaigns_brand_id_fkey"
-            columns: ["brand_id"]
-            isOneToOne: false
-            referencedRelation: "v_signups_30d"
-            referencedColumns: ["brand_id"]
-          },
-        ]
+        Relationships: []
       }
       v_contacts: {
         Row: {
@@ -979,6 +891,28 @@ export type Database = {
           },
         ]
       }
+      v_last_sync: {
+        Row: {
+          brand_id: string | null
+          last_ok_at: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "provider_batches_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "brands"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "provider_batches_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "v_signups_30d"
+            referencedColumns: ["brand_id"]
+          },
+        ]
+      }
       v_share_links: {
         Row: {
           brand_id: string | null
@@ -1031,13 +965,6 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "campaigns"
             referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "share_links_campaign_id_fkey"
-            columns: ["campaign_id"]
-            isOneToOne: false
-            referencedRelation: "v_campaign_performance"
-            referencedColumns: ["campaign_id"]
           },
         ]
       }
@@ -1098,6 +1025,36 @@ export type Database = {
       }
       current_brand_id: { Args: never; Returns: string }
       dispatch_mark_failed: {
+        Args: { p_reason: string; p_send_id: string }
+        Returns: {
+          accepted_count: number | null
+          batch_id: string | null
+          batch_key: string | null
+          body_sha256: string | null
+          brand_id: string
+          campaign_id: string
+          confirmed_at: string | null
+          confirmed_by: string | null
+          created_at: string
+          dispatch_attempts: number
+          dispatch_lease_until: string | null
+          dispatched_at: string | null
+          failure_reason: string | null
+          id: string
+          provider_responded_at: string | null
+          recipient_count: number
+          rejected_count: number | null
+          source: Database["public"]["Enums"]["send_source"]
+          status: Database["public"]["Enums"]["send_status"]
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "sends"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
+      dispatch_mark_partial: {
         Args: { p_reason: string; p_send_id: string }
         Returns: {
           accepted_count: number | null
@@ -1216,6 +1173,13 @@ export type Database = {
       is_contactable: {
         Args: { c: Database["public"]["Tables"]["contacts"]["Row"] }
         Returns: boolean
+      }
+      last_poll_status: {
+        Args: never
+        Returns: {
+          finished_at: string
+          status: string
+        }[]
       }
       normalize_event_type: {
         Args: { p: string }

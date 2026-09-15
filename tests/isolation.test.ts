@@ -37,6 +37,7 @@ export const VIEWS = [
   "v_campaign_performance",
   "v_contacts",
   "v_share_links", // Story 5.1: the ONLY read path for share links (no hash columns, + status)
+  "v_last_sync", // Story 6.2: max(last_ok_at) per brand over provider_batches, security_invoker
 ] as const satisfies readonly (keyof Database["public"]["Views"])[];
 /**
  * Story 5.1: `share_links` is deliberately NOT in TABLES — `authenticated` holds a column-level SELECT on its
@@ -58,6 +59,8 @@ type Relation = (typeof RELATIONS)[number];
  * S15); `send_recipients` / `provider_batches` are NOT listed — only a portal send writes them (4.2 / 4.3) and
  * every test send is deleted again — own-brand > 0 for those two is proven by the pgTAP fixtures.
  */
+// `v_last_sync` is NOT seeded: it has a row only once a portal send has a provider batch (own-brand > 0 is proven by
+// the pgTAP fixtures); the anonymous refusal and the "no foreign brand_id" checks still run for it.
 const SEEDED_TABLES: readonly Relation[] = [
   "brands",
   "app_users",

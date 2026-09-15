@@ -28,7 +28,7 @@ select is(bool_and(not p.prosecdef), true, 'F3 none of the dispatch_* functions 
 from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like 'dispatch\_%';
 select is(bool_and(exists (select 1 from unnest(p.proconfig) cfg where cfg = 'search_path=""')), true, 'F3 every dispatch_* function pins search_path = ''''')
 from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like 'dispatch\_%';
-select is((select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like 'dispatch\_%'), 4::bigint, 'F3 exactly four dispatch_* functions');
+select is((select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like 'dispatch\_%'), 5::bigint, 'F3 exactly five dispatch_* functions (the four of 4.3 + dispatch_mark_partial from Story 6.2)');
 select is(p.provolatile, 'v', 'F4 dispatch_take_lease is volatile') from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname = 'dispatch_take_lease';
 select is(p.provolatile, 's', 'F4 dispatch_recipients is stable') from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname = 'dispatch_recipients';
 select is(p.provolatile, 'v', 'F4 dispatch_record_result is volatile') from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname = 'dispatch_record_result';

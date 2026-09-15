@@ -14,7 +14,7 @@
 
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(68);
+select plan(75);
 
 -- ============================================================================
 -- F: the function — internal, security invoker, volatile, search_path pinned, no exposed execute.
@@ -72,12 +72,14 @@ select pg_temp.lstage(r, 7, array['BATCH-D', 'B-ONLY', '2026-03-20T07:15:00Z', '
 select pg_temp.lstage(r, 8, array['BATCH-E', 'KIL-TEST', 'yesterday', '50', 'sent'])              from (select '00000000-0000-4000-8000-00000000a0a1'::uuid r) t;  -- unparseable_queued_at
 select pg_temp.lstage(r, 9, array['BATCH-F', 'KIL-TEST', '2026-03-21T07:15:00Z', '1.5k', 'sent']) from (select '00000000-0000-4000-8000-00000000a0a1'::uuid r) t;  -- unparseable_recipient_count
 select pg_temp.lstage(r, 10, array['BATCH-G', 'NOPE', 'bad', 'x', 'sent'])                        from (select '00000000-0000-4000-8000-00000000a0a1'::uuid r) t;  -- superseded: never judged, only warned
-select pg_temp.lstage(r, 11, array['BATCH-G', 'KIL-TEST', '2026-03-22 08:00', '0', 'queued'])     from (select '00000000-0000-4000-8000-00000000a0a1'::uuid r) t;  -- clean: zero recipients, status ignored
+select pg_temp.lstage(r, 11, array['BATCH-G', 'KIL-TEST', '2026-03-22 08:00', '0', ' Sent '])     from (select '00000000-0000-4000-8000-00000000a0a1'::uuid r) t;  -- clean: zero recipients, status lower(btrim) = sent
+select pg_temp.lstage(r, 12, array['BATCH-H', 'KIL-TEST', '2026-03-23T07:15:00Z', '5', 'queued'])   from (select '00000000-0000-4000-8000-00000000a0a1'::uuid r) t;  -- unsupported_status (Story 6.2 / 4.5 review f)
+select pg_temp.lstage(r, 13, array['batch_key', 'campaign_external_id', 'queued_at', 'recipient_count', 'status']) from (select '00000000-0000-4000-8000-00000000a0a1'::uuid r) t;  -- repeated_header
 
 create temp table t_r1 as select internal.import_send_log('00000000-0000-4000-8000-00000000a0a1') as s;
 
 select is((select s from t_r1) - 'warnings' - 'warned_rows',
-  '{"staged": 11, "rejected": 6, "routed": 0, "candidates": 2, "inserted": 2, "updated": 0, "unchanged": 0, "already_present": 0, "loaded": 2, "duplicates": 3}'::jsonb,
+  '{"staged": 13, "rejected": 8, "routed": 0, "candidates": 2, "inserted": 2, "updated": 0, "unchanged": 0, "already_present": 0, "loaded": 2, "duplicates": 3}'::jsonb,
   'R1 run r1 summary counts');
 select is((select array_agg(k order by k) from jsonb_object_keys((select s from t_r1)) k),
   array['already_present', 'candidates', 'duplicates', 'inserted', 'loaded', 'rejected', 'routed', 'staged', 'unchanged', 'updated', 'warned_rows', 'warnings'],
@@ -112,10 +114,13 @@ select is(pg_temp.reasons('00000000-0000-4000-8000-00000000a0a1', 'reject', 8), 
 select is((select detail from public.import_issues where run_id = '00000000-0000-4000-8000-00000000a0a1' and row_no = 8), '{"value": "yesterday"}'::jsonb, 'J5 detail is the raw stamp');
 select is(pg_temp.reasons('00000000-0000-4000-8000-00000000a0a1', 'reject', 9), 'unparseable_recipient_count', 'J6 "1.5k" → reject unparseable_recipient_count');
 select is((select detail from public.import_issues where run_id = '00000000-0000-4000-8000-00000000a0a1' and row_no = 9), '{"value": "1.5k"}'::jsonb, 'J6 detail is the raw count');
-select is((select count(*) from public.import_issues where run_id = '00000000-0000-4000-8000-00000000a0a1' and severity = 'reject'), 6::bigint, 'J7 six reject issues in run r1');
-select is((select count(*) from public.sends where batch_key in ('BATCH-B', 'BATCH-C', 'BATCH-D', 'BATCH-E', 'BATCH-F') or batch_key = ''), 0::bigint, 'J8 rejected rows are not loaded');
+select is(pg_temp.reasons('00000000-0000-4000-8000-00000000a0a1', 'reject', 12), 'unsupported_status', 'J6b "queued" → reject unsupported_status (only sent batches are complete history — Story 6.2)');
+select is((select detail from public.import_issues where run_id = '00000000-0000-4000-8000-00000000a0a1' and row_no = 12), '{"value": "queued"}'::jsonb, 'J6b detail is the raw status');
+select is(pg_temp.reasons('00000000-0000-4000-8000-00000000a0a1', 'reject', 13), 'repeated_header', 'J6c a repeated header record → reject repeated_header (not unknown_campaign)');
+select is((select count(*) from public.import_issues where run_id = '00000000-0000-4000-8000-00000000a0a1' and severity = 'reject'), 8::bigint, 'J7 eight reject issues in run r1');
+select is((select count(*) from public.sends where batch_key in ('BATCH-B', 'BATCH-C', 'BATCH-D', 'BATCH-E', 'BATCH-F', 'BATCH-H', 'batch_key') or batch_key = ''), 0::bigint, 'J8 rejected rows are not loaded');
 select is((select string_agg(reason, ',' order by reason) from public.import_issues where run_id = '00000000-0000-4000-8000-00000000a0a1' and severity = 'reject'),
-  'blank_batch_key,unknown_campaign,unknown_campaign,unparseable_queued_at,unparseable_recipient_count,wrong_column_count', 'J9 the six reject reasons, in full');
+  'blank_batch_key,repeated_header,unknown_campaign,unknown_campaign,unparseable_queued_at,unparseable_recipient_count,unsupported_status,wrong_column_count', 'J9 the eight reject reasons, in full');
 
 -- the inserted row's fields
 select is((select row(brand_id, campaign_id, source, status, recipient_count, confirmed_at, dispatched_at,
@@ -128,7 +133,7 @@ select is((select row(brand_id, campaign_id, source, status, recipient_count, co
   'S1 BATCH-A: brand A, KIL-TEST, source seed_send_log, status complete, recipient_count 100, confirmed_at = dispatched_at = queued_at, the portal-only columns null');
 select is((select batch_key from pg_temp.send('BATCH-A')), 'BATCH-A', 'S2 batch_key stored btrimmed');
 select is((select row(recipient_count, confirmed_at)::text from pg_temp.send('BATCH-G')), row(0, '2026-03-22T08:00:00Z'::timestamptz)::text,
-  'S3 BATCH-G: zero recipients accepted, a zone-less stamp read as UTC, the status column ignored');
+  'S3 BATCH-G: zero recipients accepted, a zone-less stamp read as UTC, status " Sent " accepted after lower(btrim)');
 select is((select count(*) from public.sends where source = 'seed_send_log' and brand_id = pg_temp.brand('SENDLOGTEST-A')), 2::bigint, 'S4 two seed sends in brand A after r1');
 select is((select count(*) from public.send_recipients r join public.sends s on s.id = r.send_id where s.source = 'seed_send_log'), 0::bigint, 'S5 a seed send has no recipient snapshot');
 select is((select count(*) from public.provider_batches p join public.sends s on s.id = p.send_id where s.source = 'seed_send_log'), 0::bigint, 'S5 a seed send has no provider batch');
@@ -142,11 +147,11 @@ select is((select row(reported_sent, reported_delivered)::text from public.campa
 -- ============================================================================
 create temp table t_r1b as select internal.import_send_log('00000000-0000-4000-8000-00000000a0a1') as s;
 select is((select s from t_r1b) - 'warnings' - 'warned_rows',
-  '{"staged": 11, "rejected": 6, "routed": 0, "candidates": 2, "inserted": 0, "updated": 0, "unchanged": 2, "already_present": 2, "loaded": 2, "duplicates": 3}'::jsonb,
+  '{"staged": 13, "rejected": 8, "routed": 0, "candidates": 2, "inserted": 0, "updated": 0, "unchanged": 2, "already_present": 2, "loaded": 2, "duplicates": 3}'::jsonb,
   'I1 same run_id again: inserted 0, already_present = candidates, everything else identical');
 select is((select count(*) from public.sends where source = 'seed_send_log' and brand_id = pg_temp.brand('SENDLOGTEST-A')), 2::bigint, 'I2 sends count unchanged after the re-run');
 select is((select count(*) from public.import_runs where id = '00000000-0000-4000-8000-00000000a0a1'), 1::bigint, 'I3 still one import_runs row for the run (report replaced)');
-select is((select count(*) from public.import_issues where run_id = '00000000-0000-4000-8000-00000000a0a1' and severity = 'reject'), 6::bigint, 'I4 the rewritten report has the same six rejects (not twelve)');
+select is((select count(*) from public.import_issues where run_id = '00000000-0000-4000-8000-00000000a0a1' and severity = 'reject'), 8::bigint, 'I4 the rewritten report has the same eight rejects (not sixteen)');
 
 -- fresh run_id, only the clean rows re-staged (the seed re-stages every file under a new run_id each time)
 select pg_temp.lstage(r, 1, array['BATCH-A', 'KIL-TEST', '2026-03-17T07:15:00Z', '100', 'sent']) from (select '00000000-0000-4000-8000-00000000a0a2'::uuid r) t;
@@ -181,6 +186,10 @@ create temp table t_b1 as select internal.import_send_log('00000000-0000-4000-80
 select is((select s from t_b1) - 'warnings' - 'warned_rows',
   '{"staged": 3, "rejected": 1, "routed": 0, "candidates": 2, "inserted": 1, "updated": 0, "unchanged": 1, "already_present": 1, "loaded": 2, "duplicates": 0}'::jsonb,
   'B1 brand B: B-ONLY loads, KIL-TEST is unknown in B, BATCH-A already present (global key) → inserted 1');
+select is(pg_temp.reasons('00000000-0000-4000-8000-00000000a0b1', 'warn', 3), 'batch_key_taken', 'B1b BATCH-A under brand B → warn batch_key_taken (the key belongs to brand A''s send — Story 6.2 / 4.5 review e)');
+select is((select detail from public.import_issues where run_id = '00000000-0000-4000-8000-00000000a0b1' and row_no = 3), '{"value": "BATCH-A"}'::jsonb, 'B1b detail is the key');
+select is((select (s->>'warnings')::int from t_b1), 1, 'B1b one warning in the brand-B run');
+select is((select count(*) from public.import_issues where run_id = '00000000-0000-4000-8000-00000000a0a2' and reason = 'batch_key_taken'), 0::bigint, 'B1c the same brand + campaign re-loading its own key is NOT batch_key_taken (plain already_present)');
 select is((select row(brand_id, campaign_id)::text from pg_temp.send('BATCH-B1')),
   row(pg_temp.brand('SENDLOGTEST-B'), (select id from public.campaigns where external_id = 'B-ONLY'))::text, 'B2 BATCH-B1 stored under brand B');
 select is(pg_temp.reasons('00000000-0000-4000-8000-00000000a0b1', 'reject', 2), 'unknown_campaign', 'B3 brand A''s campaign is unknown to a brand-B file');

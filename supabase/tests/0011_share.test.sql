@@ -11,7 +11,7 @@
 
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(190);
+select plan(191);
 
 -- ============================================================================
 -- T: shape — share_links, internal.share_attempts, v_share_links, the three functions, the grant surface.
@@ -413,7 +413,11 @@ begin
   for r in execute 'explain (costs off) ' || p_sql loop v := v || r."QUERY PLAN" || E'\n'; end loop;
   return v;
 end $$;
-select ok(pg_temp.plan_of('select * from public.v_signups_30d') !~ 'Join Filter', 'E3 v_signups_30d plan has no Join Filter (the window CTE is inlined)');
+-- Story 6.2: the assertion pins the property, not the join method — after the suppression backfill rewrote 36k contact
+-- rows the planner switched to a merge join whose day-equality lands in a Join Filter; the signup_at bounds still sit in
+-- the scan's own predicate, which is what NOT MATERIALIZED buys.
+select ok(pg_temp.plan_of('select * from public.v_signups_30d') !~ 'Join Filter:[^\n]*signup_at (>=|<)', 'E3 v_signups_30d plan: no Join Filter carries the signup_at window bounds (the window CTE is inlined)');
+select ok(pg_temp.plan_of('select * from public.v_signups_30d') ~ '(Index Cond|Filter): [^\n]*signup_at >=', 'E3 ... the window bounds are in the scan''s own predicate');
 select ok(pg_temp.plan_of('select * from public.v_signups_30d') ~ '(Filter|Index Cond): .*signup_at >= ', 'E3 the signup_at lower bound is a scan predicate on contacts');
 select ok(pg_temp.plan_of('select * from public.v_signups_30d') !~ 'CTE Scan', 'E3 no CTE Scan: nothing is materialised');
 select is(current_user::text, 'postgres', 'Z1 role restored before finish');

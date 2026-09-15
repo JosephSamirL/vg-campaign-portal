@@ -29,12 +29,14 @@ insert into t_allow_auth_exec values ('is_contactable');   -- Story 3.1: securit
 insert into t_allow_auth_exec values ('recipient_preview');   -- Story 4.1: secdef, brand-checked, raises not_in_brand / invalid_input
 insert into t_allow_auth_exec values ('confirm_send');        -- Story 4.2: secdef, owner-only + brand-checked; the only write path into sends
 insert into t_allow_auth_exec values ('create_share_link'), ('revoke_share_link'), ('get_shared_results');  -- Story 5.1 (0011_share.sql): owner RPCs + the public door
+insert into t_allow_auth_exec values ('last_poll_status');   -- Story 6.2 (0012_events_ingest.sql): secdef over internal.poll_log, two columns, brand-agnostic (poller health is global)
 
 create temp table t_allow_secdef(fn text);
 insert into t_allow_secdef values ('current_brand_id'), ('current_app_role');
 insert into t_allow_secdef values ('recipient_preview');      -- Story 4.1 (internal.recipient_classification has no grant and lives in internal: in neither list)
 insert into t_allow_secdef values ('confirm_send');           -- Story 4.2 (0007_confirm_send.sql)
 insert into t_allow_secdef values ('create_share_link'), ('revoke_share_link'), ('get_shared_results');  -- Story 5.1 (0011_share.sql)
+insert into t_allow_secdef values ('last_poll_status');       -- Story 6.2 (dispatch_mark_partial is service_role-only and invoker, like its 0008 siblings: in neither list)
 
 create temp table t_view_exceptions(relname text);     -- views without brand_id; each needs its own assertion
 
@@ -112,9 +114,11 @@ begin
   insert into public.send_recipients (send_id, brand_id, contact_id, external_id, address)
   values ('00000000-0000-4000-8000-0000000000a4', ba, (select id from public.contacts where brand_id = ba and external_id = 'CT-A1'), 'CT-A1', 'ct-a1@tenancy.test'),
          ('00000000-0000-4000-8000-0000000000b4', bb, (select id from public.contacts where brand_id = bb and external_id = 'CT-B1'), 'CT-B1', 'ct-b1@tenancy.test');
-  insert into public.provider_batches (send_id, brand_id, batch_id)
-  values ('00000000-0000-4000-8000-0000000000a4', ba, 'FIX-BATCH-A'),
-         ('00000000-0000-4000-8000-0000000000b4', bb, 'FIX-BATCH-B');
+  -- Story 6.2: brand A's batch carries last_ok_at so v_last_sync (max(last_ok_at) per brand, security_invoker) has an
+  -- own row > 0 for A and none for B through RLS.
+  insert into public.provider_batches (send_id, brand_id, batch_id, last_ok_at)
+  values ('00000000-0000-4000-8000-0000000000a4', ba, 'FIX-BATCH-A', now()),
+         ('00000000-0000-4000-8000-0000000000b4', bb, 'FIX-BATCH-B', null);
   -- Story 5.1: share_links — one active link per brand on that brand's own campaign (fixed ids for the per-RPC
   -- block). brand_counts() covers share_links through the granted brand_id column (count(*), never select *)
   -- and v_share_links through its brand_id. internal.share_attempts has no brand_id and lives outside public.

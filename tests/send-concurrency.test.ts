@@ -172,8 +172,9 @@ if (!configured) {
  * `provider_batches` row, and the mock saw exactly one distinct Idempotency-Key, `send-<id>`. A third call is
  * skipped; the KAROO owner gets 404 `not_in_brand` (RLS hides the send); the KILELE analyst 403 `not_owner`;
  * no auth 401; a bad cron secret 401. Then, on fresh sends: a provider 4xx → `failed` with the sanitised reason, and a
- * provider 5xx → the send STAYS `dispatched` under its lease (no re-POST, a further call is skipped) — the
- * sweep's business, not this invocation's. Crash recovery (4.3 review): a 200 whose body was lost leaves the send
+ * provider 5xx → with `DISPATCH_RETRY_ENABLED` unset (supabase/mock.env — the sweep is off until Story 6.3 enables it,
+ * D-7) the unknown outcome is `partial` immediately with `failure_reason` `provider_503_outcome_unknown`, `accepted_count`
+ * null, no re-POST, a further call skipped as `status_partial`. Crash recovery (4.3 review): a 200 whose body was lost leaves the send
  * `dispatched` (never `failed`); once the lease is expired (service role) a re-invoke replays the SAME
  * `Idempotency-Key`, the mock answers the stored batch_id (`replay: true`) and the send reaches `reporting` with
  * attempts 2 and one distinct key. Skipped loudly when the function is not served (fails under CI).
@@ -431,7 +432,7 @@ describe.skipIf(!dispatchConfigured)("dispatch-send: exactly once through the Ed
     }
   });
 
-  it("a provider 5xx leaves the send dispatched under its lease: no re-POST, a further call is skipped", async () => {
+  it("a provider 5xx with retries off (DISPATCH_RETRY_ENABLED unset) marks the send partial — outcome unknown, nothing fabricated, no re-POST", async () => {
     const fresh = await confirmFreshSend(owner);
     createdSends.push(fresh.sendId);
     const before = (await mockCalls()).length;
@@ -439,24 +440,33 @@ describe.skipIf(!dispatchConfigured)("dispatch-send: exactly once through the Ed
     try {
       const res = await invokeDispatch(fresh.sendId, ownerHeaders);
       expect(res.status).toBe(202);
-      // wait for the background POST to have happened (the mock records it), then the state must be unchanged
+      // wait for the background POST to have happened (the mock records it), then for the CAS to partial (6.2, D-7)
       const started = Date.now();
       while ((await mockCalls()).length === before && Date.now() - started < POLL_LIMIT_MS) await new Promise((r) => setTimeout(r, POLL_MS));
       const calls = await mockCalls();
       expect(calls.length).toBe(before + 1);
       expect(calls[calls.length - 1]).toMatchObject({ key: `send-${fresh.sendId}`, status: 503 });
-      await new Promise((r) => setTimeout(r, POLL_MS));
-      const send = await readSend(owner.supabase, fresh.sendId);
-      expect(send.status).toBe("dispatched");
+      let send = await readSend(owner.supabase, fresh.sendId);
+      while (send.status === "dispatched" && Date.now() - started < POLL_LIMIT_MS) {
+        await new Promise((r) => setTimeout(r, POLL_MS));
+        send = await readSend(owner.supabase, fresh.sendId);
+      }
+      expect(send.status).toBe("partial");
+      expect(send.failure_reason).toBe("provider_503_outcome_unknown");
       expect(send.batch_id).toBeNull();
-      expect(send.failure_reason).toBeNull();
+      expect(send.accepted_count).toBeNull(); // the portal renders "provider outcome unknown" (4.4)
+      expect(send.provider_responded_at).toBeNull();
       expect(send.dispatch_attempts).toBe(1);
-      expect(send.dispatch_lease_until && new Date(send.dispatch_lease_until).getTime()).toBeGreaterThan(Date.now());
-      // the lease is held: a further call in the same window is skipped, nothing more reaches the provider
+      // partial is terminal: a further call is skipped on the pre-check, nothing more reaches the provider
       const again = await invokeDispatch(fresh.sendId, ownerHeaders);
       expect(again.status).toBe(200);
-      expect(again.body).toMatchObject({ skipped: true, reason: "lease_unavailable" });
+      expect(again.body).toMatchObject({ skipped: true, reason: "status_partial" });
       expect((await mockCalls()).length).toBe(before + 1);
+      // ... and the campaign is free again (uq_sends_one_active_per_campaign ignores partial): a fresh confirm succeeds
+      const next = await owner.supabase.rpc("confirm_send", { p_campaign_id: fresh.campaign.id, p_expected_count: fresh.recipientCount });
+      expect(next.error).toBeNull();
+      expect(next.data?.id).toBeTruthy();
+      if (next.data?.id) createdSends.push(next.data.id);
     } finally {
       await mockConfig({ status: null });
     }

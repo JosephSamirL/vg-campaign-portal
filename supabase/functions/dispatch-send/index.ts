@@ -31,17 +31,20 @@
  *                    attempt replays the same Idempotency-Key and reads the same batch_id (4.3 review [M])
  *                    4xx → dispatch_mark_failed (failure_reason = `provider_<status>: <first 120 chars, no newlines>`;
  *                    the raw body is in the log line only)
- *                    5xx / timeout / network → nothing: the send stays `dispatched` under its lease; never
- *                    re-POST in this invocation — the sweep retries once the lease expires, and caps at 3
+ *                    5xx / timeout / network → never re-POST in this invocation. While `DISPATCH_RETRY_ENABLED`
+ *                    is not `on` (the sweep is disabled — D-7, Story 6.1 row a: it is enabled together with
+ *                    the secret in Story 6.3) the outcome is unknown and stays unknown: dispatch_mark_partial
+ *                    → `partial` with failure_reason `provider_<status>_outcome_unknown` /
+ *                    `provider_unreachable_outcome_unknown`, accepted_count null (the portal reads "provider
+ *                    outcome unknown"). With retries on, the send stays `dispatched` under its lease: the sweep
+ *                    replays the same Idempotency-Key once the lease expires and caps at 3 attempts.
  *   Every transition is CAS on `status = 'dispatched' and batch_id is null` inside the SQL functions.
  *   One JSON log line per step: { fn, send_id, step, ok, ms }.
  *
  * The provider secrets are checked before the lease: a deploy without PROVIDER_BASE_URL / PROVIDER_API_KEY answers
- * `500 misconfigured` and never consumes one of the three attempts. The paths that still need SQL — `partial`
- * immediately when retries are off (`dispatch_mark_partial`), the attempt-cap reason, the 24-h age ceiling, a
- * `batch_id` unique violation inside `dispatch_record_result` — are carried by Story 6.2's migration; until then
- * an unknown outcome stays `dispatched` under its lease and the portal offers the owner a Retry once the lease has
- * expired (4.4).
+ * `500 misconfigured` and never consumes one of the three attempts. The SQL side of the unknown-outcome paths
+ * (`dispatch_mark_partial`, the sweep's cap reason and 24-h ceiling, the `batch_id` collision inside
+ * `dispatch_record_result`) landed in `0012_events_ingest.sql` (Story 6.2).
  */
 import { logStep, stopwatch } from "../_shared/log.ts";
 import { failureReason, missingProviderEnv, postMessages, recipientId, type ProviderRecipientEcho, type Recipient } from "../_shared/provider.ts";
@@ -50,6 +53,18 @@ import { serviceClient, userClient } from "../_shared/supabase.ts";
 const FN = "dispatch-send";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PROVIDER_TIMEOUT_MS = 60_000;
+
+/** Retries (the sweep replaying the same key) are opt-in per environment; unset or anything but `on` means off (D-7). */
+function retryEnabled(): boolean {
+  return Deno.env.get("DISPATCH_RETRY_ENABLED") === "on";
+}
+
+/** The stored reason for an unknown outcome: the code first (the portal renders the part before ':'), detail after. */
+function unknownOutcomeReason(result: { kind: "server_error"; status: number } | { kind: "network_error"; error: string }): string {
+  if (result.kind === "server_error") return `provider_${result.status}_outcome_unknown`;
+  const flat = result.error.replace(/\s+/g, " ").trim().slice(0, 120);
+  return flat ? `provider_unreachable_outcome_unknown: ${flat}` : "provider_unreachable_outcome_unknown";
+}
 
 type SendRow = {
   id: string;
@@ -174,7 +189,9 @@ async function run(sendId: string, send: SendRow): Promise<void> {
     return;
   }
 
-  // 5xx / timeout / network: leave `dispatched` — the lease expires in 10 min and the sweep decides
+  // 5xx / timeout / network: the outcome is unknown. Retries on → leave `dispatched` (the lease expires in 10 min and
+  // the sweep replays the same key). Retries off (the default until Story 6.3 enables the sweep) → partial now, D-7.
+  const retry = retryEnabled();
   logStep({
     fn: FN,
     send_id: sendId,
@@ -184,8 +201,20 @@ async function run(sendId: string, send: SendRow): Promise<void> {
     outcome: result.kind,
     status: result.kind === "server_error" ? result.status : undefined,
     error: result.kind === "network_error" ? result.error : undefined,
-    left: "dispatched",
+    retry_enabled: retry,
+    left: retry ? "dispatched" : "partial",
   });
+  if (retry) return;
+  const reason = unknownOutcomeReason(result);
+  t = stopwatch();
+  const { data, error } = await service.rpc("dispatch_mark_partial", { p_send_id: sendId, p_reason: reason });
+  logStep({ fn: FN, send_id: sendId, step: "mark_partial", ok: !error, ms: t(), reason: failureReasonPrefix(reason), rows: Array.isArray(data) ? data.length : 0, error: error?.message });
+}
+
+/** The code before ':' — what the portal shows (components/send/send-status.tsx does the same). */
+function failureReasonPrefix(reason: string): string {
+  const colon = reason.indexOf(":");
+  return (colon === -1 ? reason : reason.slice(0, colon)).trim();
 }
 
 async function handle(req: Request): Promise<Response> {
