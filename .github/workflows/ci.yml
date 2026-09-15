@@ -1,0 +1,93 @@
+# Story 7.2 — CI on every push / PR (architecture "Pattern enforcement": pgTAP + Vitest + tsc --noEmit + schema drift).
+#
+# No secret is ever read here. The whole run targets the LOCAL Supabase stack that `supabase start` boots on the
+# runner (the CLI's well-known demo keys, printed by `supabase status -o env`); the provider is tests/provider-mock.ts,
+# started by Vitest's globalSetup on port 8787 (supabase/mock.env points the served Edge Functions at
+# host.docker.internal:8787). No real provider batch is ever dispatched, no hosted project is ever touched, and
+# SUPABASE_SERVICE_ROLE_KEY / PROVIDER_API_KEY / DATABASE_URL never appear in this file — the seed and test steps
+# receive the runner's own local values through $GITHUB_ENV, which the "Local stack env" step fills at run time.
+name: ci
+
+on: [push, pull_request]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.117.0 # the version the repo was developed against (README, "Stack")
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint (ESLint, incl. the lib/supabase/admin boundary)
+        run: pnpm lint
+
+      - name: Type-check
+        run: pnpm exec tsc --noEmit
+
+      - name: Schema drift (schema.sql must equal the concatenated migrations)
+        run: |
+          pnpm schema:dump
+          git diff --exit-code -- schema.sql || {
+            echo "::error file=schema.sql::schema.sql is stale — run \`pnpm schema:dump\` and commit it with the migration"; exit 1; }
+
+      - name: Start the local Supabase stack
+        run: supabase start -x studio,imgproxy,mailpit,logflare,vector
+
+      - name: Local stack env (demo keys of the runner's own stack — not secrets)
+        run: supabase status -o env | sed -e 's/^\([A-Z_0-9]*\)="\(.*\)"$/\1=\2/' >> "$GITHUB_ENV"
+
+      - name: Reset + pgTAP (supabase db reset && supabase test db)
+        run: supabase db reset && supabase test db
+
+      - name: Seed the local stack (users → stage → import; credentials.<host>.txt stays on the runner)
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ env.API_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ env.SERVICE_ROLE_KEY }}
+          DATABASE_URL: ${{ env.DB_URL }}
+        run: pnpm seed
+
+      - name: Write .env.test for the local stack
+        run: bash scripts/ci-env.sh
+
+      - name: Serve the Edge Functions against the provider mock
+        run: |
+          nohup supabase functions serve --env-file supabase/mock.env --no-verify-jwt > functions-serve.log 2>&1 &
+          for i in $(seq 1 60); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API_URL/functions/v1/dispatch-send" \
+                    -H "apikey: ${PUBLISHABLE_KEY:-$ANON_KEY}" -H 'Content-Type: application/json' -d '{' || true)"
+            if [ "$code" = "400" ]; then echo "dispatch-send served (400 invalid_input on a malformed body)"; exit 0; fi
+            sleep 2
+          done
+          echo "::error::the Edge Functions never came up"; cat functions-serve.log; exit 1
+
+      - name: Vitest (provider mock via globalSetup on 8787)
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ env.API_URL }}
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ env.PUBLISHABLE_KEY || env.ANON_KEY }}
+        run: pnpm test
+
+      - name: Edge Function logs
+        if: failure()
+        run: cat functions-serve.log || true
+
+      - name: Stop the local stack
+        if: always()
+        run: supabase stop --no-backup || true

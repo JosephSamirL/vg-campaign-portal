@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # schema.sql is the concatenation of every migration, in order — the reproducible
 # source of the database. Regenerate with `pnpm schema:dump` after any migration change.
+#
+# Byte-deterministic (Story 7.2): CI runs this and `git diff --exit-code -- schema.sql`
+# right after it, so the output may embed no timestamp, no hostname, no tool version,
+# and the file order must not depend on the locale (macOS vs Linux collation) — hence
+# `LC_ALL=C sort` on the migration names rather than the shell's glob order.
 set -euo pipefail
 shopt -s nullglob
 cd "$(dirname "$0")/.."
-files=(supabase/migrations/*.sql)
+files=()
+while IFS= read -r f; do files+=("$f"); done < <(printf '%s\n' supabase/migrations/*.sql | LC_ALL=C sort)
 if [ ${#files[@]} -eq 0 ]; then
   echo "schema-dump: no migrations found in supabase/migrations/" >&2
   exit 1
