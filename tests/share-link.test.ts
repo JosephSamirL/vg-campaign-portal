@@ -105,7 +105,10 @@ describe("share link — a stranger opens the link (Story 5.3)", () => {
     if (createdIds.length === 0) return;
     const { error } = await serviceClient().from("share_links").delete().in("id", createdIds);
     if (error) throw new Error(`cleanup share_links: ${error.message}`);
-    await owner?.supabase.auth.signOut();
+    // scope: "local" — the default (global) revokes EVERY session of the shared KILELE owner login, including the one
+    // tests/send-concurrency.test.ts is using in a parallel worker (GoTrue then answers session_not_found → the served
+    // dispatch-send logs "Auth session missing!" and 401s). Seen on the CI runner (Story 7.2), hidden locally by timing.
+    await owner?.supabase.auth.signOut({ scope: "local" });
   });
 
   it("issues 43-char URL-safe tokens and never renders them anywhere but the RPC result", () => {
