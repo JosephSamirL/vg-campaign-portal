@@ -313,8 +313,11 @@ select is(internal.complete_sends(), 0, 'C3 a second call flips nothing (compare
 -- P: poll_log / v_last_sync / last_poll_status
 -- ============================================================================
 select is((select count(*) from public.last_poll_status()), (select least(count(*), 1) from internal.poll_log), 'P1 last_poll_status: one row when a run exists, none otherwise');
-insert into internal.poll_log (status, requested_at) values ('ok', now() - interval '10 min');
-insert into internal.poll_log (status, requested_at, finished_at, batches, pages, inserted, duplicates, error) values ('deferred', now() - interval '1 min', now(), 1, 2, 3, 4, 'retry_after');
+-- Dated AHEAD of the clock: last_poll_status() orders by requested_at, and the live pg_cron jobs from 0013 (poll-events-5m
+-- fires at every */5 tick and commits a real `failed / missing_secret` row while the Vault is empty) would otherwise be
+-- newer than a past-dated fixture whenever the suite runs across a tick (seen on CI, Story 7.2). Rolled back with the rest.
+insert into internal.poll_log (status, requested_at) values ('ok', now() + interval '50 min');
+insert into internal.poll_log (status, requested_at, finished_at, batches, pages, inserted, duplicates, error) values ('deferred', now() + interval '59 min', now(), 1, 2, 3, 4, 'retry_after');
 select is((select row(status, finished_at)::text from public.last_poll_status()), row('deferred', now())::text, 'P2 last_poll_status returns the newest row''s status + finished_at only');
 select is((select count(*) from public.last_poll_status() l), 1::bigint, 'P2 ... exactly one row');
 select is((select status::text from internal.poll_log where id = (select max(id) from internal.poll_log)), 'deferred', 'P3 poll_log stores the deferred status');
