@@ -401,6 +401,14 @@ deno_version = 2
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
+# Story 4.3 — dispatch-send authenticates its callers itself: a user JWT (Authorization: Bearer, resolved with
+# auth.getUser() + current_app_role() = owner) OR the pg_cron sweep's `x-cron-secret` (= secret CRON_SECRET).
+# verify_jwt is off because the sweep signs with a shared secret, not a JWT (`sb_secret_` keys are not JWTs).
+# Secrets (PROVIDER_BASE_URL, PROVIDER_API_KEY, CRON_SECRET): `supabase secrets set …` hosted; locally
+# `supabase functions serve dispatch-send --env-file supabase/.env.mock` (see README, "Dispatch").
+[functions.dispatch-send]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327

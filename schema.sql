@@ -1416,3 +1416,210 @@ comment on function public.confirm_send(uuid, int) is
   'Confirm a send for one campaign of the caller''s brand, exactly once: not_owner (role is distinct from owner), not_in_brand (foreign / unknown / null campaign), invalid_input (channel not email/sms, or zero recipients), count_mismatch with hint = the recount; otherwise inserts sends(confirmed, portal) + the send_recipients snapshot (external_id, address; ordered by contact_id) and body_sha256 = sha256 of the external_ids joined by \n. A concurrent second confirm (unique_violation on uq_sends_one_active_per_campaign) returns the existing non-terminal send.';
 revoke execute on function public.confirm_send(uuid, int) from public, anon;
 grant execute on function public.confirm_send(uuid, int) to authenticated;
+
+-- >>> supabase/migrations/0008_dispatch.sql
+-- 0008_dispatch.sql — dispatch through the provider, crash-safe (Story 4.3; architecture D-7, D-2; Step-3
+-- amendments #4, #6, #12; Story-Time amendments S7, S20: 0006_sends.sql is frozen on hosted, so the dispatch SQL
+-- is its own migration; the sweep + cron job follow in 0009_cron_dispatch.sql).
+--
+-- The four functions behind the `dispatch-send` Edge Function. All SECURITY INVOKER with search_path pinned and
+-- EXECUTE granted to service_role only: they run as service_role (bypassrls) from the Edge Function's service
+-- client, never from the browser — `authenticated` holds SELECT only on sends (D-2), so every status transition
+-- below is a compare-and-set that the app cannot reproduce or bypass.
+--
+-- dispatch_take_lease(send)   — THE lease (architecture D-7, verbatim): from confirmed|dispatched with a null
+--                               batch_id, lease null or expired, attempts < 3 → dispatched, attempts + 1, a 10-min
+--                               lease, dispatched_at set once. Zero rows = someone else holds the lease, the cap is
+--                               reached, or the send is not dispatchable — the caller answers { skipped: true }.
+--                               Re-entry from `dispatched` covers a crash between the CAS and the POST.
+-- dispatch_recipients(send)   — the confirmed snapshot as ONE jsonb array ordered by contact_id (external_id +
+--                               address). One row on purpose: PostgREST's max_rows (1000) would silently truncate a
+--                               50,000-row result. The Edge Function recomputes sha256(external_ids joined by '\n')
+--                               over this array and refuses to POST unless it equals sends.body_sha256 (4.2's digest).
+-- dispatch_record_result(send, batch_id, accepted_ids, rejected_count)
+--                             — the 2xx outcome. accepted_count = count(distinct accepted ∩ send_recipients.external_id)
+--                               (the provider's echo is not trusted: duplicates and strangers do not count),
+--                               reporting when accepted_count = recipient_count else partial, provider_responded_at,
+--                               then the provider_batches row (polling 'active'; on conflict do nothing).
+--                               CAS: where status = 'dispatched' and batch_id is null — a replayed response after
+--                               the first one landed changes nothing.
+-- dispatch_mark_failed(send, reason)
+--                             — the 4xx / body_hash_mismatch outcome: failed + failure_reason (≤ 500 chars) +
+--                               provider_responded_at, same CAS. 5xx / timeout / network call none of these: the
+--                               send stays dispatched under its lease and the sweep (0009) retries or caps it.
+
+-- ---------------------------------------------------------------------------
+-- dispatch_take_lease
+-- ---------------------------------------------------------------------------
+create function public.dispatch_take_lease(p_send_id uuid) returns setof public.sends
+language sql volatile set search_path = '' as $$
+  update public.sends
+     set dispatch_lease_until = now() + interval '10 min',
+         dispatch_attempts = dispatch_attempts + 1,
+         status = 'dispatched',
+         dispatched_at = coalesce(dispatched_at, now())
+   where id = p_send_id
+     and status in ('confirmed', 'dispatched') and batch_id is null
+     and (dispatch_lease_until is null or dispatch_lease_until < now())
+     and dispatch_attempts < 3
+  returning *;
+$$;
+comment on function public.dispatch_take_lease(uuid) is
+  'Service-role only. Takes the 10-minute dispatch lease on a confirmed|dispatched send with no batch_id, a null or expired lease and fewer than 3 attempts: attempts + 1, status dispatched, dispatched_at set once. Zero rows = skip (lease held, cap reached, or not dispatchable).';
+
+-- ---------------------------------------------------------------------------
+-- dispatch_recipients — one row, the canonical order
+-- ---------------------------------------------------------------------------
+create function public.dispatch_recipients(p_send_id uuid) returns jsonb
+language sql stable set search_path = '' as $$
+  select coalesce(jsonb_agg(jsonb_build_object('external_id', r.external_id, 'address', r.address) order by r.contact_id), '[]'::jsonb)
+    from public.send_recipients r
+   where r.send_id = p_send_id;
+$$;
+comment on function public.dispatch_recipients(uuid) is
+  'Service-role only. The send''s confirmed recipient snapshot as one jsonb array [{external_id, address}] ordered by contact_id — the order body_sha256 was computed in. Empty array for an unknown send.';
+
+-- ---------------------------------------------------------------------------
+-- dispatch_record_result — the 2xx outcome
+-- ---------------------------------------------------------------------------
+create function public.dispatch_record_result(p_send_id uuid, p_batch_id text, p_accepted_ids text[], p_rejected_count int)
+returns setof public.sends
+language plpgsql volatile set search_path = '' as $$
+declare
+  v_accepted int;
+  v_send public.sends;
+begin
+  select count(distinct r.external_id) into v_accepted
+    from public.send_recipients r
+   where r.send_id = p_send_id and r.external_id = any (p_accepted_ids);
+
+  update public.sends s
+     set batch_id = p_batch_id,
+         accepted_count = v_accepted,
+         rejected_count = p_rejected_count,
+         provider_responded_at = now(),
+         status = case when v_accepted = s.recipient_count then 'reporting'::public.send_status else 'partial'::public.send_status end
+   where s.id = p_send_id and s.status = 'dispatched' and s.batch_id is null
+  returning * into v_send;
+
+  if found then
+    insert into public.provider_batches (send_id, brand_id, batch_id, polling)
+    values (v_send.id, v_send.brand_id, p_batch_id, 'active')
+    on conflict (send_id) do nothing;
+    return next v_send;
+  end if;
+end $$;
+comment on function public.dispatch_record_result(uuid, text, text[], int) is
+  'Service-role only. Records the provider''s 2xx: batch_id, accepted_count = count(distinct accepted ∩ send_recipients.external_id), rejected_count, provider_responded_at, status reporting (all accepted) or partial; inserts provider_batches(polling active). CAS on status = dispatched and batch_id is null — zero rows when already recorded.';
+
+-- ---------------------------------------------------------------------------
+-- dispatch_mark_failed — the 4xx / hash-mismatch outcome
+-- ---------------------------------------------------------------------------
+create function public.dispatch_mark_failed(p_send_id uuid, p_reason text) returns setof public.sends
+language sql volatile set search_path = '' as $$
+  update public.sends
+     set status = 'failed',
+         failure_reason = left(p_reason, 500),
+         provider_responded_at = now()
+   where id = p_send_id and status = 'dispatched' and batch_id is null
+  returning *;
+$$;
+comment on function public.dispatch_mark_failed(uuid, text) is
+  'Service-role only. Marks a dispatched send with no batch_id as failed with failure_reason (cut to 500 chars) and provider_responded_at. CAS: zero rows when the send is not dispatched or already carries a batch_id.';
+
+-- ---------------------------------------------------------------------------
+-- grants — service_role only (not in the tenancy suite's anon/authenticated/secdef allow-lists)
+-- ---------------------------------------------------------------------------
+revoke execute on function
+  public.dispatch_take_lease(uuid),
+  public.dispatch_recipients(uuid),
+  public.dispatch_record_result(uuid, text, text[], int),
+  public.dispatch_mark_failed(uuid, text)
+from public, anon, authenticated;
+grant execute on function
+  public.dispatch_take_lease(uuid),
+  public.dispatch_recipients(uuid),
+  public.dispatch_record_result(uuid, text, text[], int),
+  public.dispatch_mark_failed(uuid, text)
+to service_role;
+
+-- >>> supabase/migrations/0009_cron_dispatch.sql
+-- 0009_cron_dispatch.sql — the dispatch sweep (Story 4.3 AC6; architecture D-7, D-14; Story-Time amendments S13, S20).
+--
+-- pg_cron job `dispatch-sweep` (every 5 min) → internal.dispatch_sweep():
+--   (a) dispatched sends with no batch_id, an expired lease and 3 attempts → partial. The provider never answered
+--       three times; the outcome is unknown (FR-19) and the send is NEVER re-POSTed. CAS: status = 'dispatched'
+--       and batch_id is null.
+--   (b) one net.http_post to the dispatch-send Edge Function per candidate: status in (confirmed, dispatched),
+--       batch_id is null, lease null or expired, attempts < 3, confirmed more than 2 minutes ago (younger sends are
+--       the app's own invoke in flight — D-12 returns after the lease). `confirmed` is included on purpose: it is
+--       the recovery when the portal's invoke never reached the function. The function takes the lease and
+--       bumps the attempts (the sweep never touches those columns), so an overlap between the sweep and a live
+--       invocation is harmless — the CAS lease admits exactly one of them.
+--   Both values come from Vault (`functions_url`, `cron_secret`), created per environment by hand with
+--   vault.create_secret() (README) — never in a migration. Missing secrets: step (a) still runs, step (b) is
+--   skipped with a warning (visible in the cron.job_run_details output), nothing is queued.
+--
+-- The job is created DISABLED: the probe (Story 6.1) must first confirm that a replayed Idempotency-Key returns
+-- the same batch_id. Until then a crashed dispatch is capped by (a) → partial instead of being retried.
+--
+-- Runs as the job owner (postgres) in database `postgres`: security invoker, search_path pinned; no grants —
+-- `internal` is not exposed and the function is not executable by anon / authenticated / service_role.
+
+create extension if not exists pg_cron;
+create extension if not exists pg_net;
+
+create function internal.dispatch_sweep() returns void
+language plpgsql volatile set search_path = '' as $$
+declare
+  v_url text;
+  v_secret text;
+  v_capped int;
+  v_queued int := 0;
+  s record;
+begin
+  -- (a) the cap: three attempts, no provider response, lease expired → partial (unknown outcome, never re-POSTed)
+  update public.sends
+     set status = 'partial'
+   where status = 'dispatched'
+     and batch_id is null
+     and dispatch_lease_until is not null and dispatch_lease_until < now()
+     and dispatch_attempts >= 3;
+  get diagnostics v_capped = row_count;
+
+  -- (b) re-invoke the Edge Function for every candidate, signed with the cron secret
+  select decrypted_secret into v_url from vault.decrypted_secrets where name = 'functions_url' limit 1;
+  select decrypted_secret into v_secret from vault.decrypted_secrets where name = 'cron_secret' limit 1;
+  if v_url is null or v_secret is null then
+    raise warning 'dispatch_sweep: Vault secrets functions_url / cron_secret missing — capped %, re-invoke skipped', v_capped;
+    return;
+  end if;
+
+  for s in
+    select id from public.sends
+     where status in ('confirmed', 'dispatched')
+       and batch_id is null
+       and (dispatch_lease_until is null or dispatch_lease_until < now())
+       and dispatch_attempts < 3
+       and confirmed_at < now() - interval '2 min'
+     order by confirmed_at
+  loop
+    perform net.http_post(
+      url := rtrim(v_url, '/') || '/dispatch-send',
+      headers := jsonb_build_object('Content-Type', 'application/json', 'x-cron-secret', v_secret),
+      body := jsonb_build_object('send_id', s.id),
+      timeout_milliseconds := 30000);
+    v_queued := v_queued + 1;
+  end loop;
+
+  raise notice 'dispatch_sweep: capped %, re-invoked %', v_capped, v_queued;
+end $$;
+comment on function internal.dispatch_sweep() is
+  'pg_cron dispatch-sweep (every 5 min): (a) dispatched, no batch_id, lease expired, 3 attempts → partial; (b) net.http_post <functions_url>/dispatch-send with x-cron-secret from Vault for confirmed|dispatched sends with no batch_id, a null/expired lease, < 3 attempts, confirmed > 2 min ago. Vault secrets functions_url + cron_secret are created by hand per environment.';
+revoke execute on function internal.dispatch_sweep() from public, anon, authenticated, service_role;
+
+select cron.schedule('dispatch-sweep', '*/5 * * * *', $$select internal.dispatch_sweep()$$);
+-- cron.job is owned by supabase_admin (postgres may not UPDATE it directly): alter_job is the supported way
+select cron.alter_job(jobid, active := false) from cron.job where jobname = 'dispatch-sweep';
+-- enable after the provider probe (Story 6.1) confirms replay returns the same batch_id:
+--   select cron.alter_job(jobid, active := true) from cron.job where jobname = 'dispatch-sweep';

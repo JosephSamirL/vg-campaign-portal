@@ -15,6 +15,8 @@ export default defineConfig({
     environment: "node",
     include: ["tests/**/*.test.ts"],
     setupFiles: ["tests/setup.ts"],
+    // Story 4.3: the provider mock (tests/provider-mock.ts) runs for the whole Vitest run on PROVIDER_MOCK_PORT (8787).
+    globalSetup: ["tests/global-setup.ts"],
     testTimeout: 30_000,
   },
 });

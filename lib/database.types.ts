@@ -962,6 +962,102 @@ export type Database = {
         Returns: Database["public"]["Enums"]["app_role"]
       }
       current_brand_id: { Args: never; Returns: string }
+      dispatch_mark_failed: {
+        Args: { p_reason: string; p_send_id: string }
+        Returns: {
+          accepted_count: number | null
+          batch_id: string | null
+          batch_key: string | null
+          body_sha256: string | null
+          brand_id: string
+          campaign_id: string
+          confirmed_at: string | null
+          confirmed_by: string | null
+          created_at: string
+          dispatch_attempts: number
+          dispatch_lease_until: string | null
+          dispatched_at: string | null
+          failure_reason: string | null
+          id: string
+          provider_responded_at: string | null
+          recipient_count: number
+          rejected_count: number | null
+          source: Database["public"]["Enums"]["send_source"]
+          status: Database["public"]["Enums"]["send_status"]
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "sends"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
+      dispatch_recipients: { Args: { p_send_id: string }; Returns: Json }
+      dispatch_record_result: {
+        Args: {
+          p_accepted_ids: string[]
+          p_batch_id: string
+          p_rejected_count: number
+          p_send_id: string
+        }
+        Returns: {
+          accepted_count: number | null
+          batch_id: string | null
+          batch_key: string | null
+          body_sha256: string | null
+          brand_id: string
+          campaign_id: string
+          confirmed_at: string | null
+          confirmed_by: string | null
+          created_at: string
+          dispatch_attempts: number
+          dispatch_lease_until: string | null
+          dispatched_at: string | null
+          failure_reason: string | null
+          id: string
+          provider_responded_at: string | null
+          recipient_count: number
+          rejected_count: number | null
+          source: Database["public"]["Enums"]["send_source"]
+          status: Database["public"]["Enums"]["send_status"]
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "sends"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
+      dispatch_take_lease: {
+        Args: { p_send_id: string }
+        Returns: {
+          accepted_count: number | null
+          batch_id: string | null
+          batch_key: string | null
+          body_sha256: string | null
+          brand_id: string
+          campaign_id: string
+          confirmed_at: string | null
+          confirmed_by: string | null
+          created_at: string
+          dispatch_attempts: number
+          dispatch_lease_until: string | null
+          dispatched_at: string | null
+          failure_reason: string | null
+          id: string
+          provider_responded_at: string | null
+          recipient_count: number
+          rejected_count: number | null
+          source: Database["public"]["Enums"]["send_source"]
+          status: Database["public"]["Enums"]["send_status"]
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "sends"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
       is_contactable: {
         Args: { c: Database["public"]["Tables"]["contacts"]["Row"] }
         Returns: boolean

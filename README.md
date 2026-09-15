@@ -26,7 +26,7 @@ pnpm dev                     # http://localhost:3000
 
 | Command | What it does |
 |---|---|
-| `pnpm test` | Vitest (`tests/**/*.test.ts`) against the local stack — `tests/isolation.test.ts` needs `.env.test` (below) |
+| `pnpm test` | Vitest (`tests/**/*.test.ts`) against the local stack — `tests/isolation.test.ts` needs `.env.test` (below); the dispatch half of `tests/send-concurrency.test.ts` needs `dispatch-send` served against the provider mock (see *Dispatch*) and skips loudly otherwise |
 | `pnpm test:db` | pgTAP suites in `supabase/tests/` |
 | `pnpm seed` | Loads the seed data in one command (see *Seed load counts*): users → stage all eleven files → import contacts ×4 → campaigns ×3 → events ×3, one `import_runs` row per file, one summary line per file, exit code 1 if any importer raises. Flags: `--only=users\|stage\|import\|all` (default `all`), `--sample=N`, `--file=<basename>`, `--entity=contacts\|campaigns\|events` (import step; `send_log` arrives with Story 4.5); the stage and import steps need `DATABASE_URL` |
 | `pnpm schema:dump` | Regenerates `schema.sql` from `supabase/migrations/*.sql` |
@@ -107,6 +107,44 @@ Google, step by step (cannot be scripted — needs the Google Cloud Console UI):
 
 `config.toml` changes take effect on the next `supabase start` / `supabase db reset`.
 
+## Dispatch (Story 4.3)
+
+A confirmed send reaches the provider through the Edge Function `supabase/functions/dispatch-send` — once, even if the server dies mid-way or the provider is slow. The portal (Story 4.4) invokes it with the owner's session after `confirm_send`; the function authenticates the caller itself (`verify_jwt = false`, because the sweep signs with a shared secret and `sb_secret_` keys are not JWTs):
+
+| Caller | Header | Load | Refusals |
+|---|---|---|---|
+| portal | `Authorization: Bearer <user jwt>` | user-scoped client (RLS proves the brand) | 401 no/invalid session · 403 `not_owner` (analyst) · 404 `not_in_brand` (another brand's send) · 400 `invalid_input` |
+| `dispatch-sweep` (pg_cron) | `x-cron-secret: <CRON_SECRET>` | service-role client | 401 wrong secret · 404 `not_found` |
+
+Then: pre-check (`status in (confirmed, dispatched) and batch_id is null`, else `200 { skipped, reason }`) → **the lease** (`dispatch_take_lease`: 10 min, `dispatch_attempts + 1`, cap 3, CAS — zero rows → `200 { skipped: true }`) → `202 { send_id, status: 'dispatched', dispatch_attempts }` → in `EdgeRuntime.waitUntil`: the snapshot in `contact_id` order (`dispatch_recipients`, one jsonb row), `sha256(external_ids joined by '\n')` must equal `sends.body_sha256` (else `failed` / `body_hash_mismatch`, no POST), `POST /v1/messages` with `Idempotency-Key: send-<send_id>` and a 60 s timeout. 2xx → `dispatch_record_result` (`accepted_count = count(distinct accepted ∩ send_recipients.external_id)`, `reporting` when it equals `recipient_count` else `partial`, `provider_batches` row); 4xx → `dispatch_mark_failed` (`failure_reason = provider_<status>: <body>`); 5xx / timeout / network → the send **stays `dispatched`** under its lease and is never re-POSTed by that invocation. One JSON log line per step (`{ fn, send_id, step, ok, ms }`) in the function logs. All four `dispatch_*` functions are `security invoker`, granted to `service_role` only (`0008_dispatch.sql`).
+
+**The sweep** (`0009_cron_dispatch.sql`): pg_cron job `dispatch-sweep`, every 5 min, `internal.dispatch_sweep()` — (a) `dispatched`, no `batch_id`, lease expired, 3 attempts → `partial` (unknown outcome, FR-19); (b) `net.http_post` to `<functions_url>/dispatch-send` with the Vault `cron_secret` for `confirmed|dispatched` sends with no `batch_id`, a null/expired lease, < 3 attempts, confirmed more than 2 min ago. **Created disabled** — enable after the provider probe (Story 6.1) confirms a replayed `Idempotency-Key` returns the same `batch_id`:
+
+```sql
+select cron.alter_job(jobid, active := true) from cron.job where jobname = 'dispatch-sweep';
+```
+
+**Secrets.** Hosted: `supabase secrets set PROVIDER_BASE_URL=https://dispatcher-production-72fc.up.railway.app PROVIDER_API_KEY=… CRON_SECRET=…` (the same three live in the git-ignored `supabase/.env` for a local serve against the **real** provider — only ever for Story 6.1's deliberate probe). `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` are injected by the platform. Deploy with `supabase functions deploy dispatch-send` (`verify_jwt = false` comes from `supabase/config.toml`).
+
+**Vault (manual, per environment — never in a migration).** The sweep reads two secrets:
+
+```sql
+select vault.create_secret('https://<project-ref>.supabase.co/functions/v1', 'functions_url', 'base URL of the Edge Functions');
+select vault.create_secret('<the CRON_SECRET set above>', 'cron_secret', 'x-cron-secret for dispatch-send');
+```
+
+Without them step (a) still runs and step (b) logs a warning and queues nothing.
+
+**Local loop — the real provider is never called.** `tests/provider-mock.ts` is the provider for CI and development (D-14): `POST /v1/messages` (401 without a key; honours `Idempotency-Key` — a replayed key returns the identical response incl. `batch_id`), `GET /v1/messages/:batch_id/events` (≤ 1000 per page, opaque `next_cursor`, `has_more`, shuffled within a page, ~10 % duplicated across pages — Epic 6's poller is built against this), and a control surface: `POST /__mock/reset`, `POST /__mock/config` (`{ status, reject_ids, latency_ms, page_size }`), `GET /__mock/calls`. Vitest's `globalSetup` starts it on `PROVIDER_MOCK_PORT` (8787) for every `pnpm test`; standalone: `pnpm tsx tests/provider-mock.ts`.
+
+```bash
+supabase start
+supabase functions serve dispatch-send --env-file supabase/mock.env --no-verify-jwt   # PROVIDER_BASE_URL=http://host.docker.internal:8787
+pnpm test                                                                              # tests/send-concurrency.test.ts, dispatch half
+```
+
+`supabase/mock.env` is committed (no secrets: the mock accepts any key, `CRON_SECRET=local-cron-secret` guards only the local serve). The dispatch suite signs in as the KILELE owner, KILELE analyst and KAROO owner — `.env.test` needs `TEST_KAROO_OWNER_EMAIL/_PASSWORD` too (a local password set with the Admin API, like the KILELE owner's). Measured locally: KIL-0016's 50,064 recipients → `reporting` in ~0.5 s (recipients 124 ms, hash 7 ms, POST 75 ms, record 86 ms).
+
 ## Exposed schemas
 
 The Data API (PostgREST) exposes only `public` and `graphql_public` — `supabase/config.toml` `[api] schemas = ["public", "graphql_public"]` locally, and the same list under Project Settings → Data API → Exposed schemas on the hosted project.
@@ -132,6 +170,7 @@ _Grows with every attack test that lands._
 - **Signed-out `/dashboard`, `/`, `/campaigns/1`** → `307 /login`; **`/share/x` and `/api/health` signed out** → not redirected (404 until Epics 5/7 add them), and `/login`, `/auth/*`, `/_next/*` never bounce — the matcher regex is pinned by `tests/proxy-matcher.test.ts`. `/` with a session → `307 /dashboard`.
 - **Valid session, no `app_users` row** (local only: `delete from app_users where email = 'marrakech.analyst@vg-eval.test'`, sign in) → `/dashboard` → `307 /auth/signout?reason=no_access` → `303 /login?reason=no_access` ("Your account has no brand access. Contact Velocity Growth."), session cookie cleared (`Max-Age=0`). Row restored afterwards; 7 linked rows.
 - **Google refusal path** — `/auth/callback?error=access_denied&error_code=signup_disabled&error_description=Signups+not+allowed…` (what Auth sends for an unlisted Google account with sign-ups OFF) → `307 /login?reason=not_allowed` ("This Google account is not on the allow-list for this portal."), no session created; any other `error_code` → `reason=oauth_failed`; a bare `/auth/callback` → `/login`. With the Google provider still OFF, the button reaches Supabase's `/authorize`, which answers `400 validation_failed` — the live `joegmes@gmail.com` → KILELE Owner check waits on the Google Cloud OAuth client (Manual Auth settings).
+- **Two `dispatch-send` invocations at once for one send** (Story 4.3, `tests/send-concurrency.test.ts` against the served function + the mock) — both load the send as `confirmed`; `dispatch_take_lease` admits exactly one (`202`, attempts 1), the other gets `200 { skipped: true, reason: 'lease_unavailable' }`; the send reaches `reporting` with one `provider_batches` row and the mock saw one distinct `Idempotency-Key` (`send-<id>`). A third call → `skipped` / `batch_recorded`; the KAROO owner → `404 not_in_brand`; the KILELE analyst → `403 not_owner`; no auth, a garbage bearer and a wrong cron secret → `401`. A tampered `body_sha256` → `failed` / `body_hash_mismatch` with **no** provider call; a mock `422` → `failed` / `provider_422: …` and the campaign is free to confirm again; a mock `503` → the send stays `dispatched` with a live lease, attempts 1, and a further call is `skipped` — nothing is re-POSTed until the sweep. pgTAP mutation drills on `0008`/`0009` (each in a rolled-back transaction): dropping `batch_id is null` from the lease → `L6`/`Z1`; dropping the CAS from `dispatch_mark_failed` → `M2`/`M3` (6 lines); ordering the recipients by `external_id` → `R1`/`R3`; granting a `dispatch_*` function to `authenticated` → `G2`/`N1`; dropping the sweep's 2-min age → `V2` (the just-confirmed send is re-invoked); dropping `attempts >= 3` from the cap → `W3`; letting the sweep ignore a live lease → `V6`.
 - **`tests/isolation.test.ts` with RLS disabled on `brands`** (`alter table public.brands disable row level security`) → `brands: exactly the analyst's own brand` fails with `expected [ 'KILELE', 'KAROO', 'MARRAKECH' ] to deeply equal [ 'KILELE' ]`; re-enabled → 6/6 pass. Anonymous PostgREST selects on every table return `42501` (permission denied), not empty arrays.
 
 ## Seed load counts
@@ -296,6 +335,11 @@ _Grows as migrations land. Every `public` table: RLS enabled + forced, one `sele
 | `internal.normalize_spend(text) → numeric`, `internal.normalize_int(text) → int` | `0004_import_campaigns_events.sql` | `221,09` / `221.09` → `221.09`; digits-only int4; blank or anything else → `null`; `immutable`, `search_path` pinned; not exposed |
 | `internal.import_campaigns(run_id uuid) → jsonb` | `0004_import_campaigns_events.sql` | the campaigns importer (reject / warn / last-duplicate-wins / strictly-newer upsert of source columns) + the second pass that resolves `parent_campaign_id` within the brand only (`parent_not_in_brand` / `parent_unknown` → null + warn); not exposed |
 | `internal.import_events(run_id uuid) → jsonb` | `0004_import_campaigns_events.sql` | the events importer: contact must be in the file brand (or have been routed out of it — the event follows it, `event_follows_routed_contact`), campaign looked up in the file brand only (`unknown_campaign` → `campaign_id null`, kept for contactability), `type` via `public.normalize_event_type`, `raw = {"cols": […]}`, `source = 'seed'`, `on conflict do nothing` (`already_present` in the summary); never sets `suppressed_at` (Story 6.2); not exposed |
+
+| `public.sends`, `public.send_recipients`, `public.provider_batches`, enums `send_status` / `send_source`, `internal.recipient_classification(campaign)`, `public.recipient_preview(campaign)` | `0006_sends.sql` | send records + the exact recipient preview (Story 4.1); `authenticated` holds SELECT only |
+| `public.confirm_send(campaign, expected_count)` | `0007_confirm_send.sql` | confirm exactly once (Story 4.2): owner-only, brand-checked, freezes the snapshot + `body_sha256` |
+| `public.dispatch_take_lease(send)`, `dispatch_recipients(send)`, `dispatch_record_result(send, batch_id, accepted_ids[], rejected_count)`, `dispatch_mark_failed(send, reason)` | `0008_dispatch.sql` | the Edge Function's four service-role-only functions (Story 4.3): the 10-min lease with the attempts cap, the one-row ordered snapshot, the 2xx outcome (`accepted ∩ recipients`, `reporting`/`partial`, `provider_batches`), the 4xx outcome — every transition CAS on `status = 'dispatched' and batch_id is null` |
+| `internal.dispatch_sweep()`, cron job `dispatch-sweep` (`*/5 * * * *`, **disabled**) | `0009_cron_dispatch.sql` | pg_cron + pg_net sweep (Story 4.3): 3 attempts + expired lease → `partial`; re-invokes `dispatch-send` for stale `confirmed|dispatched` sends with the Vault `cron_secret`; enable after the Story 6.1 probe |
 
 `0002_core_tables.sql` also opens with the schema-less `alter default privileges for role postgres revoke execute on functions from public` (Story-Time Amendment S17): a bare `create function public.f_probe()` now yields `has_function_privilege('anon', …) = false` — the per-schema line in `0000_grants.sql` could not subtract Postgres's built-in `PUBLIC` execute default. `supabase/tests/0002_core_tables.test.sql` re-runs that probe on every `pnpm test:db`.
 
