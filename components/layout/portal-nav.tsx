@@ -4,7 +4,10 @@ import { Button } from "@/components/ui/button";
 import type { AppRole } from "@/lib/current-user";
 
 /** Later stories add routes here (campaigns, contacts, …); 7.1 folds it into a mobile Sheet. */
-export const NAV_LINKS = [{ href: "/dashboard", label: "Dashboard" }] as const;
+export const NAV_LINKS = [
+  { href: "/dashboard", label: "Dashboard" },
+  { href: "/imports", label: "Imports" },
+] as const;
 
 const ROLE_LABEL: Record<AppRole, string> = { owner: "Owner", analyst: "Analyst" };
 
