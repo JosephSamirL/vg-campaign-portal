@@ -20,6 +20,7 @@ export type { MetricRule, Result };
 
 export type PerformanceRow = Database["public"]["Views"]["v_campaign_performance"]["Row"];
 export type CampaignRow = Database["public"]["Tables"]["campaigns"]["Row"];
+export type SendRow = Database["public"]["Tables"]["sends"]["Row"];
 
 /**
  * The generated view type is all-nullable (Postgres cannot prove view columns non-null).
@@ -102,4 +103,15 @@ export async function getRateRules(supabase: Supabase): Promise<Result<RateRules
   const missing = RATE_KEYS.filter((k) => !byKey[k]);
   if (missing.length > 0) return { ok: false, message: `metric_rules is missing: ${missing.join(", ")}` };
   return { ok: true, data: byKey as RateRules };
+}
+
+/**
+ * The campaign's sends, newest first (Story 4.4; 4.5 adds `seed_send_log` rows through the same
+ * query). Plain `sends` rows through RLS — the page re-runs this on every poll tick, so the list
+ * is always the server's read and never a client-side guess at a status.
+ */
+export async function getCampaignSends(supabase: Supabase, campaignId: string): Promise<Result<SendRow[]>> {
+  const { data, error } = await supabase.from("sends").select("*").eq("campaign_id", campaignId).order("created_at", { ascending: false });
+  if (error) return { ok: false, message: error.message };
+  return { ok: true, data: data ?? [] };
 }

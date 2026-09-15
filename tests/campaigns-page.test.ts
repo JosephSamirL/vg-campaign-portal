@@ -41,6 +41,13 @@ vi.mock("next/navigation", async (importOriginal) => ({
   useRouter: () => ({ refresh: () => {} }),
 }));
 
+// Story 4.4: the dialog / retry button import the server actions, which pull `next/headers`; the page needs only their identities.
+vi.mock("@/app/(portal)/campaigns/[id]/actions", () => ({
+  previewSendAction: vi.fn(),
+  confirmSendAction: vi.fn(),
+  dispatchSendAction: vi.fn(),
+}));
+
 let role: "owner" | "analyst" | null = "analyst";
 vi.mock("@/lib/current-user", () => ({
   getCurrentAppUser: async () =>
@@ -132,6 +139,29 @@ const campaignRow = {
   updated_at: "2026-09-15T00:00:00+00:00",
 };
 
+/** A portal send as `sends` returns it (Story 4.4); tests override status / counts per case. */
+const sendRow = {
+  id: "9d0e1f2a-3b4c-4d5e-8f60-1a2b3c4d5e6f",
+  brand_id: "b",
+  campaign_id: KIL_0016,
+  status: "confirmed",
+  source: "portal",
+  batch_key: null,
+  recipient_count: 50064,
+  confirmed_by: "kilele.owner@vg-eval.test",
+  confirmed_at: "2026-09-15T09:51:00+00:00",
+  dispatched_at: null,
+  provider_responded_at: null,
+  dispatch_attempts: 0,
+  dispatch_lease_until: null,
+  body_sha256: null,
+  batch_id: null,
+  accepted_count: null,
+  rejected_count: null,
+  failure_reason: null,
+  created_at: "2026-09-15T09:51:00+00:00",
+};
+
 async function renderList() {
   return renderToStaticMarkup(await CampaignsPage());
 }
@@ -146,6 +176,7 @@ beforeEach(() => {
   from.mockClear();
   role = "analyst";
   responses.metric_rules = { data: rules, error: null };
+  responses.sends = { data: [], error: null };
 });
 
 describe("/campaigns", () => {
@@ -295,29 +326,64 @@ describe("/campaigns/[id]", () => {
     expect(html).toContain("Reported by the source");
     expect(html).toContain("119.16%");
     expect(html).toContain("12,679");
-    // the two slots and their empty sentences
+    // the two slots and their empty sentences; the sends query is the story's exact shape (RLS, newest first)
+    expect(calls.sends).toEqual([["select", ["*"]], ["eq", ["campaign_id", KIL_0016]], ["order", ["created_at", { ascending: false }]]]);
     expect(html).toContain('id="sends"');
-    expect(html).toContain("No sends through the portal yet");
+    expect(html).toContain("No sends yet");
     expect(html).toContain('id="share-links"');
     expect(html).toContain("No share links yet");
-    // analyst: no placeholders
-    expect(html).not.toContain("send-placeholder");
+    // analyst: no Send button, no dialog, no Publish placeholder (Story 4.4 AC4: UI hides, DB refuses)
+    expect(html).not.toContain("send-button");
+    expect(html).not.toContain("send-dialog");
     expect(html).not.toContain("publish-placeholder");
     expect(html).not.toContain("Available soon");
   });
 
-  it("shows the disabled Send / Publish placeholders to an owner (server-side role only)", async () => {
+  it("shows the Send button (+ closed confirm dialog) and the Publish placeholder to an owner (server-side role only)", async () => {
     role = "owner";
     responses.campaigns = { data: campaignRow, error: null };
     responses.v_campaign_performance = { data: [kil16], error: null };
     const html = await renderDetail(KIL_0016);
-    expect(html).toMatch(/<button[^>]*data-testid="send-placeholder"[^>]*>Send<\/button>/);
+    expect(html).toMatch(/<button[^>]*data-testid="send-button"[^>]*>Send<\/button>/);
+    expect(html).not.toMatch(/<button[^>]*data-testid="send-button"[^>]*disabled/);
+    expect(html).toContain('data-testid="send-dialog"');
+    expect(html).toContain("Send Nairobi launch");
     expect(html).toMatch(/<button[^>]*data-testid="publish-placeholder"[^>]*>Publish results<\/button>/);
-    const send = html.match(/<button[^>]*data-testid="send-placeholder"[^>]*>/)![0];
-    expect(send).toContain("disabled");
-    expect(send).toContain('title="Available soon"');
-    expect(html.indexOf('id="sends"')).toBeLessThan(html.indexOf("send-placeholder"));
+    expect(html.indexOf('id="sends"')).toBeLessThan(html.indexOf("send-button"));
     expect(html.indexOf('id="share-links"')).toBeLessThan(html.indexOf("publish-placeholder"));
+  });
+
+  it("lists the campaign's sends with their status (Story 4.4 AC1/AC3) and polls while one is in flight", async () => {
+    responses.campaigns = { data: campaignRow, error: null };
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses.sends = {
+      data: [
+        { ...sendRow, id: "s2", status: "dispatched", dispatched_at: "2026-09-15T10:00:03Z" },
+        { ...sendRow, id: "s1", status: "partial", batch_id: "mock-3", accepted_count: 49000, rejected_count: 1064, provider_responded_at: "2026-09-15T09:51:04Z" },
+      ],
+      error: null,
+    };
+    const html = await renderDetail(KIL_0016);
+    expect(html).toContain('data-testid="send-history" data-polling="true"');
+    expect(html).toContain('data-status="dispatched"');
+    expect(html).toContain("Partially sent — 49,000 of 50,064 accepted");
+    expect(html).toContain("kilele.owner@vg-eval.test");
+    expect(html).toContain("mock-3");
+    expect(html).toContain("15 Sep 2026, 09:51 UTC");
+    expect(html.indexOf('data-send-id="s2"')).toBeLessThan(html.indexOf('data-send-id="s1"'));
+    expect(html).not.toContain("No sends yet");
+  });
+
+  it("renders the sends alert (header, figures and share links intact) when the sends query fails", async () => {
+    responses.campaigns = { data: campaignRow, error: null };
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses.sends = { data: null, error: { message: "sends timed out" } };
+    const html = await renderDetail(KIL_0016);
+    expect(html).toContain(`data-digest="${errorDigest("sends timed out")}"`);
+    expect(html).not.toContain("sends timed out");
+    expect(html).toContain("119.16%");
+    expect(html).toContain("No share links yet");
+    expect(html).not.toContain("send-history");
   });
 
   it("titles a portal row by its send id and keeps the reported block first", async () => {
@@ -344,7 +410,7 @@ describe("/campaigns/[id]", () => {
     const html = await renderDetail(KIL_0016);
     expect(html).toContain('data-testid="retry-alert"');
     expect(html).not.toContain("view timed out");
-    expect(html).toContain("No sends through the portal yet");
+    expect(html).toContain("No sends yet");
     expect(html).not.toContain("119.16%");
   });
 });

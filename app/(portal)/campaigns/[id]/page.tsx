@@ -1,14 +1,16 @@
 import { notFound } from "next/navigation";
 import { z } from "zod";
-import { PublishPlaceholder, SendPlaceholder } from "@/components/campaigns/action-placeholders";
+import { PublishPlaceholder } from "@/components/campaigns/action-placeholders";
 import { CampaignFigures } from "@/components/campaigns/campaign-figures";
 import { CampaignHeader } from "@/components/campaigns/campaign-header";
 import { CampaignSection } from "@/components/campaigns/campaign-section";
+import { SendHistory } from "@/components/campaigns/send-history";
 import { EmptyState } from "@/components/layout/empty-state";
 import { RetryAlert } from "@/components/layout/retry-alert";
+import { SendConfirmDialog } from "@/components/send/send-confirm-dialog";
 import { Separator } from "@/components/ui/separator";
 import { getCurrentAppUser } from "@/lib/current-user";
-import { getCampaign, getCampaignPerformance, getRateRules } from "@/lib/queries/campaigns";
+import { getCampaign, getCampaignPerformance, getCampaignSends, getRateRules } from "@/lib/queries/campaigns";
 import { createClient } from "@/lib/supabase/server";
 
 // Brand data under a cookie session is never cached across users: the (portal) layout opts
@@ -19,21 +21,24 @@ import { createClient } from "@/lib/supabase/server";
 const idSchema = z.uuid();
 
 /**
- * `/campaigns/[id]` — one campaign with its reported figures and the two slots later epics
- * fill: Sends (4.4 / 4.5) and Share links (5.2). The id is validated before any query; a row
- * RLS does not return (another brand's, or nobody's) is `null` → `notFound()` → the route's
- * `not-found.tsx` (D-2: "no row", never an error). The owner-only placeholders are gated on
- * the server-side session role (Story 1.5's helper), never on anything from the client.
+ * `/campaigns/[id]` — one campaign with its reported figures, its sends (Story 4.4: the Send
+ * button + confirm dialog for an owner, the history with its status poll for everyone; 4.5 adds
+ * the seed send-log rows) and the Share-links slot (5.2). The id is validated before any query;
+ * a row RLS does not return (another brand's, or nobody's) is `null` → `notFound()` → the route's
+ * `not-found.tsx` (D-2: "no row", never an error). The owner-only controls are gated on the
+ * server-side session role (Story 1.5's helper), never on anything from the client — and the
+ * RPCs refuse an analyst regardless (FR22: UI hides, DB refuses).
  */
 export default async function CampaignPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   if (!idSchema.safeParse(id).success) notFound();
 
   const supabase = await createClient();
-  const [campaign, perf, rules, me] = await Promise.all([
+  const [campaign, perf, rules, sends, me] = await Promise.all([
     getCampaign(supabase, id),
     getCampaignPerformance(supabase, id),
     getRateRules(supabase),
+    getCampaignSends(supabase, id),
     getCurrentAppUser(),
   ]);
 
@@ -62,11 +67,16 @@ export default async function CampaignPage({ params }: { params: Promise<{ id: s
         <CampaignFigures rows={perf.data} rules={rules.data} />
       )}
 
-      <CampaignSection id="sends" title="Sends" action={isOwner ? <SendPlaceholder /> : null}>
-        <EmptyState
-          title="No sends through the portal yet"
-          description="Sends made from this portal will be listed here with their status."
-        />
+      <CampaignSection
+        id="sends"
+        title="Sends"
+        action={isOwner ? <SendConfirmDialog campaignId={campaign.data.id} campaignLabel={campaign.data.name ?? campaign.data.external_id} /> : null}
+      >
+        {!sends.ok ? (
+          <RetryAlert title="Sends could not be loaded" message={sends.message} />
+        ) : (
+          <SendHistory sends={sends.data} isOwner={isOwner} />
+        )}
       </CampaignSection>
 
       <CampaignSection id="share-links" title="Share links" action={isOwner ? <PublishPlaceholder /> : null}>

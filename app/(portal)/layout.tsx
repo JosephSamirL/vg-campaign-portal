@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { PortalNav } from "@/components/layout/portal-nav";
+import { Toaster } from "@/components/ui/sonner";
 import { getCurrentAppUser } from "@/lib/current-user";
 
 // The whole portal reads the session cookie, so nothing here can be part of a static
@@ -21,6 +22,8 @@ export default async function PortalLayout({ children }: { children: React.React
     <div className="flex min-h-screen flex-col">
       <PortalNav brandName={me.brand_name} role={me.role} email={me.email} />
       <main className="mx-auto w-full max-w-5xl flex-1 p-5">{children}</main>
+      {/* success toasts only (D-12); expected failures are inline alerts where they happen */}
+      <Toaster />
     </div>
   );
 }
