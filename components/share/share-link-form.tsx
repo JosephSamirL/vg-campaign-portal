@@ -108,6 +108,7 @@ export function ShareLinkForm({ campaignId, campaignLabel }: { campaignId: strin
   const copy = async (url: string, input: HTMLInputElement | null) => {
     try {
       await navigator.clipboard.writeText(url);
+      setNotice((n) => (n?.code === "copy_failed" ? null : n)); // a later successful copy clears the stale note
       toast.success("Link copied");
     } catch {
       input?.focus();

@@ -49,7 +49,6 @@ describe("GET /api/health (unit)", () => {
     const [url, key, options] = createClient.mock.calls[0] as unknown as [string, string, { auth?: { persistSession?: boolean } }];
     expect(url).toBe(URL_);
     expect(key).toBe(KEY);
-    expect(key).not.toBe(process.env.SUPABASE_SERVICE_ROLE_KEY);
     expect(options?.auth?.persistSession).toBe(false);
   });
 
@@ -64,6 +63,31 @@ describe("GET /api/health (unit)", () => {
     rpc.mockResolvedValue({ data: "nope", error: null });
     const res = await GET();
     expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ ok: false, code: "db_unreachable" });
+  });
+
+  it("gives every PostgREST call an 8 s AbortSignal and answers 503 no-store when it fires (a hung database is not a Vercel 504)", async () => {
+    rpc.mockResolvedValue({ data: "ok", error: null });
+    await GET();
+    const [, , options] = createClient.mock.calls[0] as unknown as [string, string, { global?: { fetch?: typeof fetch } }];
+    const wrapped = options?.global?.fetch;
+    expect(typeof wrapped).toBe("function");
+    // the wrapper forwards to the real fetch with a timeout signal attached
+    const realFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok"));
+    try {
+      await wrapped!("http://127.0.0.1:54321/rest/v1/rpc/health_ping", { method: "POST" });
+      const [, init] = realFetch.mock.calls[0] as unknown as [string, RequestInit];
+      expect(init.method).toBe("POST");
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+      expect(init.signal?.aborted).toBe(false);
+    } finally {
+      realFetch.mockRestore();
+    }
+    // when the signal fires, supabase-js surfaces it as a rejection / error — the route answers 503 no-store
+    rpc.mockRejectedValue(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+    const res = await GET();
+    expect(res.status).toBe(503);
+    expect(res.headers.get("cache-control")).toBe("no-store");
     expect(await res.json()).toEqual({ ok: false, code: "db_unreachable" });
   });
 

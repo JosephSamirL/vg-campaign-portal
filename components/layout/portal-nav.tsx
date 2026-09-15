@@ -46,7 +46,7 @@ export function PortalNav({ brandName, role, email }: Props) {
           </ul>
         </div>
         <div className="flex shrink-0 items-center gap-3">
-          <span className="hidden text-muted-foreground lg:inline">{email}</span>
+          <span className="hidden text-muted-foreground md:inline">{email}</span>
           <form action="/auth/signout" method="post" className="hidden md:block" data-testid="nav-signout">
             <Button type="submit" variant="outline" size="sm">
               Log out

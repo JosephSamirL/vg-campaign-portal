@@ -16,7 +16,12 @@ import { connection, NextResponse } from "next/server";
  * `export const dynamic = "force-dynamic"` is rejected by Next 16 when `cacheComponents` is on
  * (app/(portal)/campaigns/page.tsx); `await connection()` is the Cache Components way to force request-time
  * rendering, and `Cache-Control: no-store` keeps every hop from caching the answer.
+ *
+ * Every PostgREST call carries `AbortSignal.timeout(8_000)`: a hung database answers as the documented
+ * `503 { ok: false, code: 'db_unreachable' }` (with `no-store`), not as Vercel's own 504 with no body.
  */
+const DB_TIMEOUT_MS = 8_000;
+
 export async function GET() {
   await connection();
   const headers = { "Cache-Control": "no-store" };
@@ -26,6 +31,7 @@ export async function GET() {
   try {
     const supabase = createClient(url, key, {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+      global: { fetch: (input, init) => fetch(input, { ...init, signal: AbortSignal.timeout(DB_TIMEOUT_MS) }) },
     });
     const { data, error } = await supabase.rpc("health_ping");
     if (error || data !== "ok") {

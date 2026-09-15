@@ -22,7 +22,8 @@ export type MobileNavProps = {
  * The phone navigation (Story 7.1, AC1): a 44 × 44 px ghost icon button, visible below `md`,
  * opens a left `Sheet` with the brand name, the role badge, the signed-in email, every portal
  * link (44 px tap targets) and the sign-out form. The sheet closes on navigation — the pathname
- * effect — so a tapped link never leaves it hanging over the new page. Nothing here decides
+ * effect, plus `onClick` on every link for a tap on the page already shown (or a query-only
+ * change), which never changes `pathname` — so a tapped link never leaves it hanging. Nothing here decides
  * anything: brand, role and links come from the server-rendered `PortalNav`.
  */
 export function MobileNav({ brandName, role, email, links }: MobileNavProps) {
@@ -58,6 +59,7 @@ export function MobileNav({ brandName, role, email, links }: MobileNavProps) {
               <li key={link.href}>
                 <Link
                   href={link.href}
+                  onClick={() => setOpen(false)}
                   aria-current={pathname === link.href || pathname.startsWith(`${link.href}/`) ? "page" : undefined}
                   className="flex min-h-11 items-center rounded-md px-2 text-base font-medium hover:bg-accent aria-[current=page]:bg-muted"
                   data-testid="nav-sheet-link"

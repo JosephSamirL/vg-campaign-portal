@@ -59,8 +59,9 @@ describe("PortalNav — desktop row + mobile Sheet (AC1)", () => {
     expect(inner).toContain("owner@example.test");
   });
 
-  it("keeps the desktop badge, the email (lg+) and the header sign-out (md+)", () => {
+  it("keeps the desktop badge, the email (md+, where the sheet trigger disappears) and the header sign-out (md+)", () => {
     expect(html).toMatch(/data-testid="role-badge"[^>]*>Owner</);
+    expect(html).toMatch(/class="hidden text-muted-foreground md:inline"[^>]*>owner@example\.test</);
     expect(attrs(html, "nav-signout")).toMatch(/class="[^"]*\bhidden\b[^"]*\bmd:block\b[^"]*"/);
   });
 });

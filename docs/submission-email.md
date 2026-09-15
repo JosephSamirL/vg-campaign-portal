@@ -1,6 +1,6 @@
 # Submission email — template
 
-The email that answers every item of the brief's "How to submit" list (pp. 4–5), in the brief's order. This file holds **no secret**: every `<PLACEHOLDER>` is filled into the git-ignored `submission-email.txt` (next to `credentials.txt`) from `credentials.txt` / `credentials.qaocabdpaxetofqcfgsa.supabase.co.txt` (the six passwords), the brief's email (the provider key), and the share link created on the hosted project **after the hosted seed load** (see item 9). Never paste a filled copy into the repo, an issue, or a chat.
+The email that answers every item of the brief's "How to submit" list (pp. 4–5), in the brief's order. This file holds **no secret**: every `<PLACEHOLDER>` is filled into the git-ignored `submission-email.txt` (next to `credentials.txt`) from `credentials.qaocabdpaxetofqcfgsa.supabase.co.txt` (the six hosted passwords; `credentials.txt` only as a fallback), README (b) (the publishable key), the brief's email (the provider key), and the share link created on the hosted project **after the hosted seed load** (see item 9). The **pre-send gate** under "Filling it" lists what must be true on the hosted project before the script runs. Never paste a filled copy into the repo, an issue, or a chat.
 
 ---
 
@@ -28,7 +28,8 @@ https://vg-campaign-portal.vercel.app
 They work through the app (`/login`) and directly against Supabase (`POST /auth/v1/token?grant_type=password` with the publishable key in item 4). Owners can send and publish; analysts see the same data and are refused both, by the database, not the UI.
 
 **3. Google sign-in**
-Google sign-in is live on the same login page ("Continue with Google"). It is an allow-list: the seventh pre-created account, `joegmes@gmail.com` (Kilele Rides, Owner), signs in with Google and lands on the Kilele dashboard — I'll demonstrate it on the call. Any other Google account is refused with "This Google account is not on the allow-list for this portal." and no user is created (sign-ups are off).
+<GOOGLE_STATUS>
+It is an allow-list: the seventh pre-created account, `joegmes@gmail.com` (Kilele Rides, Owner), is the Google login; any other Google account is refused with "This Google account is not on the allow-list for this portal." and no user is created (sign-ups are off).
 
 **4. Supabase project URL, anon key, table and function names, which key the deployed app uses**
 - Project URL: `https://qaocabdpaxetofqcfgsa.supabase.co`
@@ -38,7 +39,7 @@ Google sign-in is live on the same login page ("Continue with Google"). It is an
 - **The deployed app uses only the publishable key plus each user's JWT.** The service-role key exists only in my shell for the seed script and as the platform-injected secret inside the two Edge Functions; the provider key is an Edge Function secret. Neither is in Vercel, the browser, or git (README (d)).
 
 **5. Public GitHub repo**
-https://github.com/JosephSamirL/vg-campaign-portal — real history (46+ incremental commits from the untouched `create-next-app` starter), `schema.sql` at the root (the concatenation of `supabase/migrations/0000 … 0015`, regenerated on every change and checked for drift in CI), README with sections (a)–(m), tag `submission`.
+https://github.com/JosephSamirL/vg-campaign-portal — real history (46+ incremental commits from the untouched `create-next-app` starter), `schema.sql` at the root (the concatenation of `supabase/migrations/0000 … 0015`, regenerated on every change and checked for drift in CI), README with sections (a)–(m), tag `<TAG>`.
 
 **6. AI tools, time, availability**
 - AI tools: Claude Code (Claude Opus 5) with the BMad method — PRD → architecture → adversarial and edge-case reviews → 28 stories → dev / review loops with sub-agents. The agents did the typing; I directed, reviewed, and did the account / console steps. Details in README (g).
@@ -71,21 +72,56 @@ Joe
 
 ## Filling it (local machine only)
 
+### Pre-send gate — every box ticked before the script runs, or the email lies
+
+- [ ] **Hosted seed load done, twice** — `pnpm seed` over the session pooler with the database password (README (i)), then re-run: the second run reports zero new rows (idempotent), and `select count(*) from contacts` as the Kilele owner shows 82,600.
+- [ ] **Google provider ON on hosted and the 7th account signed in once** — Supabase Dashboard → Authentication → Providers → Google enabled with Joe's OAuth client (README (f) step 3); `/auth/v1/settings` shows `"google": true`; *Continue with Google* as `joegmes@gmail.com` lands on the Kilele dashboard.
+- [ ] **Share link created on hosted** — `/campaigns/<a Kilele campaign>` → *Publish results*, ≥ 8-character password, **no expiry**; opened once from an incognito window.
+- [ ] **p95 re-measured on hosted** — the three README (j) URLs against https://vg-campaign-portal.vercel.app with the loaded data; the (j) table replaced and committed.
+- [ ] **Tag `submission` pushed** — `git tag -a submission -m "…" && git push origin submission` on the commit the graders should read; CI green on it.
+- [ ] **Every `<…>` replaced** — the script's last line prints what is still open; it must print `[]` before the text is pasted into a mail client.
+
+`<GOOGLE_STATUS>` takes exactly one of two sentences, nothing else:
+
+- live — *Google sign-in is live on the same login page ("Continue with Google") — I'll demonstrate it on the call.*
+- not yet enabled — *Google sign-in is built (button, callback and allow-list refusal are tested) but the provider is not yet enabled on the hosted project, so the email + password logins above are the way in until it is.*
+
+`<TAG>` defaults to `submission-draft` (the tag on the pack as reviewed); it becomes `submission` only once the gate above is ticked and that tag exists on origin — the script refuses `submission` while the tag is missing.
+
 ```bash
 # from the repo root; writes the git-ignored submission-email.txt (mode 0600), never prints a value
-python3 - <<'EOF'
-import re, os
+# GOOGLE=live|pending  TAG=submission-draft|submission  (defaults: pending, submission-draft)
+GOOGLE="${GOOGLE:-pending}" TAG="${TAG:-submission-draft}" python3 - <<'EOF'
+import os, re, subprocess
+HOST = "qaocabdpaxetofqcfgsa.supabase.co"
 tpl = open("docs/submission-email.md").read().split("\n---\n", 1)[1].rsplit("\n---\n", 1)[0]
-creds = {l.split("\t")[0]: l.split("\t")[1] for l in open("credentials.txt").read().splitlines() if "\t" in l}
+# the six passwords: the hosted per-host file first, credentials.txt only as a fallback (README (f))
+creds_file = next((f for f in (f"credentials.{HOST}.txt", "credentials.txt") if os.path.exists(f)), None)
+assert creds_file, "no credentials.<host>.txt / credentials.txt — run `pnpm seed --only=users` against the hosted project"
+creds = {l.split("\t")[0]: l.split("\t")[1] for l in open(creds_file).read().splitlines() if "\t" in l}
 for email, pw in creds.items():
     if email.endswith("@vg-eval.test"):
-        tag = "<" + email.split("@")[0].replace(".", "_").upper() + "_PASSWORD>"
-        tpl = tpl.replace(tag, pw)
+        tpl = tpl.replace("<" + email.split("@")[0].replace(".", "_").upper() + "_PASSWORD>", pw)
 tpl = tpl.replace("<PASTE docs/submission-note.md>", open("docs/submission-note.md").read().strip())
-pk = re.search(r"^NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=(.+)$", open(".env.local").read(), re.M).group(1).strip('"')
+# the publishable key: the one README (b) prints for the hosted project, never a local demo key
+pk = re.search(r"\| Publishable key \| `(sb_publishable_[A-Za-z0-9_-]+)` \|", open("README.md").read()).group(1)
+assert pk.startswith("sb_publishable_"), "README (b) must carry the hosted sb_publishable_ key"
+env = open(".env.local").read() if os.path.exists(".env.local") else ""
+if HOST in env:  # .env.local points at hosted → it must agree with the README
+    m = re.search(r"^NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=(.+)$", env, re.M)
+    assert m and m.group(1).strip('"') == pk, ".env.local and README (b) disagree on the publishable key"
 tpl = tpl.replace("<PUBLISHABLE_KEY — verbatim in README (b)>", pk)
+google = {
+    "live": 'Google sign-in is live on the same login page ("Continue with Google") — I\'ll demonstrate it on the call.',
+    "pending": "Google sign-in is built (button, callback and allow-list refusal are tested) but the provider is not yet enabled on the hosted project, so the email + password logins above are the way in until it is.",
+}[os.environ["GOOGLE"]]
+tpl = tpl.replace("<GOOGLE_STATUS>", google)
+tag = os.environ["TAG"]
+assert tag in ("submission-draft", "submission"), "TAG must be submission-draft or submission"
+assert subprocess.run(["git", "ls-remote", "--exit-code", "--tags", "origin", f"refs/tags/{tag}"], capture_output=True).returncode == 0, f"tag {tag} is not on origin"
+tpl = tpl.replace("<TAG>", tag)
 fd = os.open("submission-email.txt", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, tpl.encode()); os.close(fd)
-print("written; still to fill by hand:", sorted(set(re.findall(r"<[A-Z_ ]+>|\[Joe to fill\]", tpl))))
+print(f"written from {creds_file}; still to fill by hand:", sorted(set(re.findall(r"<[A-Z_ ]+>|\[Joe to fill\]", tpl))))
 EOF
 ```
 

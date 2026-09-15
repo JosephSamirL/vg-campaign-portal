@@ -62,22 +62,52 @@ describe("the contracts around /api/health", () => {
     expect(vercel.crons).toEqual([{ path: "/api/health", schedule: "0 6 * * *" }]);
   });
 
-  it("ESLint fences lib/supabase/admin out of the app (any spelling) and leaves scripts/ and tests/ alone", async () => {
+  it("ESLint fences lib/supabase/admin out of the app (alias, relative, suffixed, re-export, dynamic import, require, lib-internal) and leaves scripts/ alone", async () => {
     const { ESLint } = await import("eslint");
     const eslint = new ESLint({ overrideConfigFile: "eslint.config.mjs" });
-    const probe = 'import "@/lib/supabase/admin";\nimport "../../../lib/supabase/admin";\nimport "../../../lib/supabase/admin.ts";\nexport {};\n';
-    const fenced = await eslint.lintText(probe, { filePath: ROUTE });
-    const restricted = fenced[0].messages.filter((m) => m.ruleId === "no-restricted-imports");
-    expect(restricted.map((m) => m.line)).toEqual([1, 2, 3]);
-    expect(restricted[0].message).toMatch(/publishable key/);
-    // the real route is clean
-    const real = await eslint.lintText(readFileSync(ROUTE, "utf8"), { filePath: ROUTE });
-    expect(real[0].messages.filter((m) => m.ruleId === "no-restricted-imports")).toEqual([]);
-    // the two legitimate homes of the service-role client
-    for (const filePath of ["scripts/seed/users.ts", "tests/setup.ts"]) {
-      const allowed = await eslint.lintText('import "../lib/supabase/admin";\nexport {};\n', { filePath });
-      expect(allowed[0].messages.filter((m) => m.ruleId === "no-restricted-imports")).toEqual([]);
+    const fence = async (filePath: string, src: string) => {
+      const [r] = await eslint.lintText(`${src}\nexport {};\n`, { filePath });
+      return r.messages.filter((m) => m.ruleId === "no-restricted-imports" || m.ruleId === "no-restricted-syntax");
+    };
+    // every static spelling of the module path, from a route
+    const probe = [
+      'import "@/lib/supabase/admin";',
+      'import "../../../lib/supabase/admin";',
+      'import "../../../lib/supabase/admin.ts";',
+      'import "../../../lib/supabase/admin.js";',
+      'export * from "@/lib/supabase/admin";',
+    ].join("\n");
+    const fenced = await fence(ROUTE, probe);
+    expect(fenced.map((m) => m.line)).toEqual([1, 2, 3, 4, 5]);
+    expect(fenced[0].message).toMatch(/publishable key/);
+    // dynamic import() and require() are not visited by no-restricted-imports — no-restricted-syntax covers them
+    for (const src of [
+      'const m = await import("@/lib/supabase/admin");',
+      'const m = await import("../../../lib/supabase/admin.ts");',
+      'const m = require("@/lib/supabase/admin");',
+      'const m = require("../../../lib/supabase/admin");',
+    ]) {
+      expect((await fence(ROUTE, src)).map((m) => m.ruleId), src).toContain("no-restricted-syntax");
     }
+    // inside lib/**, the short relative spellings are fenced by basename
+    for (const [filePath, src] of [
+      ["lib/supabase/anon.ts", 'import "./admin";'],
+      ["lib/supabase/server.ts", 'export { createAdminClient } from "./admin.ts";'],
+      ["lib/queries/contacts.ts", 'import "../supabase/admin";'],
+      ["lib/actions.ts", 'import "./supabase/admin";'],
+      ["lib/actions.ts", 'const m = await import("./supabase/admin");'],
+    ] as const) {
+      expect((await fence(filePath, src)).length, `${filePath}: ${src}`).toBeGreaterThan(0);
+    }
+    // tests/ is NOT exempt (nothing under tests/ imports the service-role client; tests/setup.ts builds its own client)
+    expect((await fence("tests/setup.ts", 'import "../lib/supabase/admin";')).length).toBeGreaterThan(0);
+    // the real route, the module itself and the other app imports are clean
+    const real = await eslint.lintText(readFileSync(ROUTE, "utf8"), { filePath: ROUTE });
+    expect(real[0].messages.filter((m) => m.ruleId === "no-restricted-imports" || m.ruleId === "no-restricted-syntax")).toEqual([]);
+    expect(await fence("lib/supabase/admin.ts", 'import { createClient } from "@supabase/supabase-js";')).toEqual([]);
+    expect(await fence(ROUTE, 'import "@/lib/supabase/anon";\nconst z = await import("zod");\nconst fs = require("node:fs");')).toEqual([]);
+    // the one legitimate home of the service-role client
+    expect(await fence("scripts/seed/users.ts", 'import "../../lib/supabase/admin";')).toEqual([]);
   }, 30_000);
 
   it("proxy.ts leaves /api/health outside the session guard", () => {

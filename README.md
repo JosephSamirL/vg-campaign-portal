@@ -21,15 +21,32 @@ The deployed app uses only the publishable key; the service-role key and the pro
 ```bash
 nvm use                      # Node 22 (.nvmrc)
 pnpm install
-cp .env.example .env.local   # NEXT_PUBLIC_SUPABASE_URL + NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY (local: from `supabase status -o env`)
 supabase start               # local Postgres 17 / Auth / PostgREST / Edge Runtime in Docker; applies supabase/migrations/* + seed.sql
-eval "$(supabase status -o env | grep -E '^(API_URL|SERVICE_ROLE_KEY|DB_URL)=')"
-NEXT_PUBLIC_SUPABASE_URL="$API_URL" SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" DATABASE_URL="$DB_URL" pnpm seed
+eval "$(supabase status -o env | grep -E '^(API_URL|PUBLISHABLE_KEY|ANON_KEY|SERVICE_ROLE_KEY|SECRET_KEY|DB_URL)=')"
+printf 'NEXT_PUBLIC_SUPABASE_URL=%s\nNEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=%s\n' "$API_URL" "${PUBLISHABLE_KEY:-$ANON_KEY}" > .env.local
+                             # the LOCAL stack's URL + publishable key — `pnpm dev` reads .env.local; `.env.example` only documents the names
+NEXT_PUBLIC_SUPABASE_URL="$API_URL" SUPABASE_SERVICE_ROLE_KEY="${SERVICE_ROLE_KEY:-$SECRET_KEY}" DATABASE_URL="$DB_URL" pnpm seed
                              # users → stage the 11 CSVs → import contacts / campaigns / events / send log (~20 s; idempotent)
 pnpm dev                     # http://localhost:3000 — sign in with a login from credentials.127.0.0.1-54321.txt
 ```
 
-Fresh-clone rehearsal (what CI does on every push): `git clone https://github.com/JosephSamirL/vg-campaign-portal && cd vg-campaign-portal && pnpm install && supabase start && supabase db reset && supabase test db` — every migration applies from empty and the 15 pgTAP suites (1,867 assertions) pass; `pnpm test` (422 Vitest cases) additionally needs `supabase functions serve --env-file supabase/mock.env --no-verify-jwt` (see *Dispatch* under (e)).
+To point the app at the hosted project instead, put the README (b) URL + publishable key into `.env.local` (that is all `.env.example` asks for).
+
+Fresh-clone rehearsal (what CI does on every push, in this order — `.github/workflows/ci.yml`):
+
+```bash
+git clone https://github.com/JosephSamirL/vg-campaign-portal && cd vg-campaign-portal && nvm use && pnpm install --frozen-lockfile
+pnpm lint && pnpm exec tsc --noEmit && pnpm build          # ESLint incl. the admin fence · types · next build
+pnpm schema:dump && git diff --exit-code -- schema.sql     # schema.sql = the concatenated migrations
+supabase start && supabase db reset && supabase test db    # every migration applies from empty; 15 pgTAP suites, 1,867 assertions
+eval "$(supabase status -o env | grep -E '^(API_URL|PUBLISHABLE_KEY|ANON_KEY|SERVICE_ROLE_KEY|SECRET_KEY|DB_URL)=')"
+NEXT_PUBLIC_SUPABASE_URL="$API_URL" SUPABASE_SERVICE_ROLE_KEY="${SERVICE_ROLE_KEY:-$SECRET_KEY}" DATABASE_URL="$DB_URL" pnpm seed
+bash scripts/ci-env.sh                                     # writes .env.test (local URL + key + the six logins from credentials.127.0.0.1-54321.txt)
+supabase functions serve --env-file supabase/mock.env --no-verify-jwt &   # dispatch-send / poll-events against the provider mock
+NEXT_PUBLIC_SUPABASE_URL="$API_URL" NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY="${PUBLISHABLE_KEY:-$ANON_KEY}" pnpm test   # 31 files / 423 cases, 0 skipped
+```
+
+Without the seed, `.env.test` and the served functions, `pnpm test` still passes but the integration suites (`isolation`, `send-concurrency`, `ingestion`, `share-*`, `send-actions`, `health`) **skip** with a loud console line — far fewer than 423 cases run. The 423 is what a seeded stack with `.env.test` and the served functions gives (and what CI enforces: under `CI` those suites fail instead of skipping).
 
 ### Commands
 
@@ -93,7 +110,7 @@ Public by design — this is the key the browser bundle already ships:
 | Auth | `https://qaocabdpaxetofqcfgsa.supabase.co/auth/v1/` |
 | Edge Functions | `https://qaocabdpaxetofqcfgsa.supabase.co/functions/v1/{dispatch-send,poll-events}` |
 
-The dashboard's *API Keys* page shows this `sb_publishable_…` key and the legacy `anon` JWT side by side — either is "the anon key"; they carry the same `anon` role. `sb_secret_…` (service role) is never handed over and never appears in this repo.
+The dashboard's *API Keys* page shows this `sb_publishable_…` key and the legacy `anon` JWT side by side — either is "the anon key"; they carry the same `anon` role. `sb_secret_…` (service role) is never handed over and no `sb_secret_` value appears in this repo (only the `.env.example` placeholder and a test dummy — see the sweep under (d)).
 
 Grader rehearsal, straight against Supabase with one of the six logins:
 
@@ -109,7 +126,7 @@ curl -X POST "$URL/rest/v1/rpc/confirm_send" -H "apikey: $PK" -H "Authorization:
 
 ## c. Inventory — every table, view and function
 
-From the live catalog (`pg_class` / `pg_proc` / `cron.job`, cross-checked against `schema.sql`, 2026-09-16). One line per object. Every `public` table: RLS **enabled + forced**, exactly one `select` policy (`brand_id = (select current_brand_id())`, or the row's own `auth.uid()`), `SELECT` granted to `authenticated` only, nothing to `anon`; every view `security_invoker = true`; writes happen only through the listed RPCs or the service role. `internal` and `staging` are not exposed to the Data API and have no grants for `anon` / `authenticated`.
+From the live catalog (`pg_class` / `pg_proc` / `cron.job`, cross-checked against `schema.sql`, 2026-09-16). One line per object. Every `public` table: RLS **enabled + forced**, exactly one `select` policy in one of three shapes — `brand_id = (select current_brand_id())` on every tenant table; `id = (select current_brand_id())` on `brands`; the row's own `auth.uid()` on `app_users` — plus `metric_rules` (shared, no `brand_id`): `auth.uid() is not null`, any signed-in user; `SELECT` granted to `authenticated` only, nothing to `anon`; every view `security_invoker = true`; writes happen only through the listed RPCs or the service role. `internal` and `staging` are not exposed to the Data API and have no grants for `anon` / `authenticated`.
 
 ### `public` — tables (12)
 
@@ -203,7 +220,7 @@ Enums: `public.app_role`, `event_type`, `event_source`, `issue_severity`, `send_
 
 ### The same inventory by migration (as it grew, story by story)
 
-_Grows as migrations land. Every `public` table: RLS enabled + forced, one `select` policy `brand_id = (select current_brand_id())` (or the row's own `auth.uid()`), `SELECT` to `authenticated` only, nothing to `anon`; writes only through RPCs / service role._
+_Grows as migrations land. Every `public` table: RLS enabled + forced, one `select` policy — `brand_id = (select current_brand_id())`, or `id = …` for `brands`, `auth.uid()` for `app_users`, `auth.uid() is not null` for `metric_rules` —, `SELECT` to `authenticated` only, nothing to `anon`; writes only through RPCs / service role._
 
 | Object | Migration | Purpose / key |
 |---|---|---|
@@ -256,7 +273,7 @@ The Data API (PostgREST) exposes only `public` and `graphql_public` — `supabas
 |---|---|---|
 | **Publishable key** (`sb_publishable_…`, role `anon`) | the browser bundle and Vercel env (`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`), `.env.local`, `/api/health`, the `/share` anon client — **the only key the deployed app holds** | — (public by design) |
 | **User JWT** | issued by Supabase Auth at sign-in, carried in the session cookie (`@supabase/ssr`), refreshed by `proxy.ts`; every portal read and every RPC runs as that user under RLS | never minted or stored server-side |
-| **Service-role key** (`sb_secret_…`) | (1) the engineer's shell for `pnpm seed` (`SUPABASE_SERVICE_ROLE_KEY`, read only by `scripts/seed/*` through `lib/supabase/admin.ts` — an ESLint `no-restricted-imports` fence fails the build if any file outside `scripts/**` / `tests/**` imports it); (2) `SUPABASE_SERVICE_ROLE_KEY` as injected by the platform into the two Edge Functions (`dispatch-send` uses it for the `dispatch_*` RPCs after authenticating the caller itself) | **not** in Vercel env (`vercel env ls` shows the two `NEXT_PUBLIC_*` only), not in git, not in `.env.example` as a value, never in the browser |
+| **Service-role key** (`sb_secret_…`) | (1) the engineer's shell for `pnpm seed` (`SUPABASE_SERVICE_ROLE_KEY`, read only by `scripts/seed/*` through `lib/supabase/admin.ts` — an ESLint fence fails the build if any file outside `scripts/**` imports it — alias, relative, suffixed, `export … from`, dynamic `import()` or `require()`, and inside `lib/**` any `./admin` spelling); (2) `SUPABASE_SERVICE_ROLE_KEY` as injected by the platform into the two Edge Functions (`dispatch-send` uses it for the `dispatch_*` RPCs after authenticating the caller itself) | **not** in Vercel env (`vercel env ls` shows the two `NEXT_PUBLIC_*` only), not in git, not in `.env.example` as a value, never in the browser |
 | **Provider key** (issued in the brief's email) | Edge Function secret `PROVIDER_API_KEY` (`supabase secrets set`), read only by `supabase/functions/_shared/provider.ts`; a copy in the git-ignored `supabase/.env` was used once for the deliberate live probe (Story 6.1) | not in Vercel, not in git, not in the browser, not in `docs/provider-api.md`; the submission email carries it |
 | **`CRON_SECRET`** | Edge Function secret + Vault `cron_secret` (pg_cron → pg_net → the functions' `x-cron-secret` header) | not in git (`supabase/mock.env` carries the local-only `local-cron-secret`) |
 | **`SUPABASE_DB_URL`** | platform-injected into Edge Functions (`poll-events` opens a direct connection for `internal.*`); cannot be set by hand | — |
@@ -575,7 +592,7 @@ Campaign issues, in full: Kilele `duplicate_external_id` ×2 (`CMP-014` at row 6
 
 Every number equals the architecture's expected table (S16 / Story 2.4 Dev Notes) — no deviation. Least-sure candidates for the submission note: the 633 Marrakech events whose `campaign_external_id` names no Marrakech campaign (loaded, `campaign_id null`, excluded from campaign performance); the two byte-identical Kilele campaign pairs collapsed to one row each; Karoo `CMP-014` whose parent pointer `KIL-0007` lives in Kilele (pointer dropped); the 8,412 / 4,900 duplicate event ids (byte-identical rows, one kept). Each has a pgTAP case in `supabase/tests/0004_import_campaigns_events.test.sql` (134 cases: both normalisers, every reject / warn reason, cross-brand parent, follow-a-routed-contact, `campaign_id` never resolved by `external_id` alone, idempotency with a fresh and with the same `run_id`).
 
-**Hosted full load pending: needs DB password.** `0004_import_campaigns_events.sql` is pushed (`supabase migration list`: `0000–0004` local = remote). The seed itself runs over the Supavisor **session** pooler with the project's database password (`SUPABASE_DB_PASSWORD` is not in this environment); exact command, from the repo root with Node 22:
+**Hosted full load pending: needs DB password.** Every migration is pushed (`supabase migration list`: `0000–0015` local = remote). The seed itself runs over the Supavisor **session** pooler with the project's database password (`SUPABASE_DB_PASSWORD` is not in this environment); exact command, from the repo root with Node 22:
 
 ```bash
 # hosted — one-time engineer-run job over the session pooler (port 5432, needed for COPY and the long import calls)
@@ -621,7 +638,7 @@ Ingest (`internal.ingest_provider_events(send_id, batch_id, events jsonb)`) foll
 
 _NFR-3: every portal page answers in under 2 s at the full load. **Local production build, full data** — `next build` + `next start` against the local stack with the complete seed load (Kilele 82,205 live contacts), signed in as the Kilele analyst, `curl -w '%{time_total}'`, one warm-up then ten timed requests per URL (Story 3.3). **Hosted re-measure pending seed load**: the hosted project has no contacts until the seed runs there, so a hosted timing today would measure an empty view — re-run the three URLs against https://vg-campaign-portal.vercel.app once it exists and replace this table._
 
-| URL (Kilele analyst) | p50 | max of 10 |
+| URL (Kilele analyst) | p50 | max of 10 (≈ p95) |
 |---|---|---|
 | `/contacts` (page 1 of 1,645) | 48 ms | 53 ms |
 | `/contacts?q=ami` (6,306 matches, 127 pages) | 153 ms | 165 ms |
@@ -696,7 +713,7 @@ _Grows with every attack test that lands._
 
 _NFR-4: every screen usable at 400 px — confirm and share especially. Checked headless (Chromium via Playwright in a scratch directory, not a project dependency) at **400 × 800**, `isMobile` + touch, against `pnpm dev` on the local stack with real sessions; the structural contract lives in `tests/mobile-nav.test.ts` and `tests/mobile-routes.test.ts`, the screenshots in the git-ignored `screenshots/`._
 
-- Below `md` the header keeps brand + role badge and a 44 × 44 px menu button; the links, email and sign-out move into a left `Sheet` (`components/ui/sheet.tsx`, a dependency-free native `<dialog>` with the shadcn API — no new package, like `dialog` / `tooltip` / `popover`). It closes on navigation, on Escape, on the backdrop and on ×.
+- Below `md` the header keeps brand + role badge and a 44 × 44 px menu button; the links, email and sign-out move into a left `Sheet` (`components/ui/sheet.tsx`, a dependency-free native `<dialog>` with the shadcn API — no new package, like `dialog` / `tooltip` / `popover`). It closes on a link tap (also for the page already shown), on navigation, on Escape, on the backdrop and on ×; from `md` up the email sits back in the header.
 - Every table (`contacts`, `campaigns`, `imports` ×2, dashboard performance) declares a pixel `min-w-[…]` and scrolls inside the `Table` primitive's own `overflow-x-auto` wrapper; the portal `<main>` is `min-w-0`, so `document.documentElement.scrollWidth === window.innerWidth === 400` on every route (`/login`, `/dashboard` for Kilele and for Marrakech's empty chart, `/contacts` and `?q=zzzz`, `/campaigns`, `/campaigns/[id]` as owner and as the wrong brand, `/imports?run=`, `/share/<token>` before and after unlocking, the root 404).
 - Tiles stack (`grid-cols-1 sm:grid-cols-2`); the signups SVG scales to the card (`w-full min-w-0`) with its axis text hidden below `sm` (each bar keeps its `<title>`); the send-confirm and share-link dialogs are `max-h-[90dvh] overflow-y-auto` with stacked full-width buttons (596 px and 398 px tall at 400 × 800, confirm / submit visible); every `<input>` is 16 px below `md` (no iOS focus zoom); the viewport meta stays Next's default (`width=device-width, initial-scale=1`, no `maximum-scale`).
 - Copy on `/campaigns/[id]` is a plain `onClick` → `navigator.clipboard.writeText` → toast "Link copied"; when the clipboard is unavailable (no secure context, permission denied) the URL is selected in its read-only input and a toast + inline note say "Copy manually".
@@ -708,7 +725,7 @@ Vercel Hobby and Supabase Free both go quiet when nobody visits (architecture D-
 
 | What | Where | How |
 |---|---|---|
-| `GET /api/health` | `app/api/health/route.ts` | `@supabase/supabase-js` with `NEXT_PUBLIC_SUPABASE_URL` + the **publishable key only** (no session, never `lib/supabase/admin`, no service / provider / database secret — the ESLint boundary below makes an admin import a lint error), `rpc('health_ping')` → `200 {"ok":true,"db":"ok","at":"…"}` or `503 {"ok":false,"code":"db_unreachable"}`, always `Cache-Control: no-store`. Outside the session guard (`proxy.ts` matcher, `tests/proxy-matcher.test.ts`); unauthenticated by design — do **not** create a Vercel `CRON_SECRET` env (name clash with the Supabase Vault secret from Dispatch / Polling). Under Cache Components the route forces request-time rendering with `connection()` rather than `export const dynamic`. |
+| `GET /api/health` | `app/api/health/route.ts` | `@supabase/supabase-js` with `NEXT_PUBLIC_SUPABASE_URL` + the **publishable key only** (no session, never `lib/supabase/admin`, no service / provider / database secret — the ESLint boundary below makes an admin import a lint error), `rpc('health_ping')` → `200 {"ok":true,"db":"ok","at":"…"}` or `503 {"ok":false,"code":"db_unreachable"}` (also after an 8 s `AbortSignal.timeout` on the PostgREST call — a hung database never becomes a bodiless Vercel 504), always `Cache-Control: no-store`. Outside the session guard (`proxy.ts` matcher, `tests/proxy-matcher.test.ts`); unauthenticated by design — do **not** create a Vercel `CRON_SECRET` env (name clash with the Supabase Vault secret from Dispatch / Polling). Under Cache Components the route forces request-time rendering with `connection()` rather than `export const dynamic`. |
 | `public.health_ping()` | `supabase/migrations/0014_health.sql` | `select 'ok'`, `language sql stable security invoker set search_path = ''`, revoked from `public`, granted to **`anon` only** — the tenancy suite's exact anon set is `{get_shared_results, health_ping}` (`0001_tenancy.test.sql` S5, mirrored in `0011_share.test.sql` T8); `0014_health.test.sql` pins shape, grants and the answer as `anon` / the refusal as `authenticated`. |
 | Vercel cron | `vercel.json` | `{"crons":[{"path":"/api/health","schedule":"0 6 * * *"}]}` — once a day (Hobby: at most daily, may run up to an hour late). Listed under Vercel → Settings → Cron Jobs after the deploy. |
 | pg_cron | `0009` / `0013` | `dispatch-sweep`, `poll-events-5m`, `poll-events-hourly`, `poll-log-reconcile` keep the database busy every five minutes (unchanged by this story). |
@@ -736,17 +753,18 @@ The morning of the call, in this order (five minutes; everything below is read-o
 
 ### Continuous integration
 
-`.github/workflows/ci.yml` runs on every push and pull request, on a fresh `ubuntu-latest` runner, **without a single secret**: the whole run targets the local Supabase stack that `supabase start` boots on the runner (the CLI's well-known demo keys, read at run time from `supabase status -o env`), and the provider is `tests/provider-mock.ts`. No real provider batch is ever dispatched, no hosted project is ever touched, and `SUPABASE_SERVICE_ROLE_KEY` / `PROVIDER_API_KEY` / `DATABASE_URL` never appear in the workflow file.
+`.github/workflows/ci.yml` runs on every push and pull request, on a fresh `ubuntu-latest` runner, **without a single secret**: the whole run targets the local Supabase stack that `supabase start` boots on the runner (the CLI's well-known demo keys, read at run time from `supabase status -o env`), and the provider is `tests/provider-mock.ts`. No real provider batch is ever dispatched, no hosted project is ever touched, and `SUPABASE_SERVICE_ROLE_KEY` / `PROVIDER_API_KEY` / `DATABASE_URL` never appear in the workflow file as a value and are never a repository secret (the seed and test steps bind those names to the runner's own local demo values).
 
 | Step | Fails when |
 |---|---|
 | `pnpm install --frozen-lockfile` | the lockfile is out of date |
-| `pnpm lint` (`eslint .`) | any ESLint error — including the service boundary: `lib/supabase/admin` imported anywhere but `scripts/**` and `tests/**`, whatever the spelling (`eslint.config.mjs`, `no-restricted-imports`; proven by adding `import "@/lib/supabase/admin"` to the health route and watching `pnpm lint` fail; `tests/health.test.ts` re-proves it through ESLint's API) |
+| `pnpm lint` (`eslint .`) | any ESLint error — including the service boundary: `lib/supabase/admin` imported anywhere but `scripts/**` — the alias and every relative path ending in `lib/supabase/admin` (with or without `.ts` / `.js` / `.mjs` / `.cjs` / `.mts` / `.cts`), `export … from`, dynamic `import()` and `require()` (`no-restricted-syntax`), and inside `lib/**` any import whose basename is `admin` (`./admin`, `./supabase/admin`) — (`eslint.config.mjs`; proven by adding `import "@/lib/supabase/admin"` to the health route and watching `pnpm lint` fail; `tests/health.test.ts` re-proves every spelling through ESLint's API) |
 | `pnpm exec tsc --noEmit` | a type error anywhere the app compiles (`supabase/functions` is Deno — `pnpm check:functions`) |
+| `pnpm build` (`next build`, dummy `NEXT_PUBLIC_*` values, no stack) | what only Next reports at build time: a segment config rejected under Cache Components, a client / server boundary error, a broken route file |
 | `pnpm schema:dump && git diff --exit-code -- schema.sql` | **schema drift**: `schema.sql` no longer equals the concatenation of `supabase/migrations/*.sql` (byte-deterministic, `LC_ALL=C` order, no timestamps) — a migration was edited or added without `pnpm schema:dump` in the same commit |
 | `supabase start` → `supabase db reset && supabase test db` | a migration does not apply from empty, or any pgTAP suite fails (the isolation test included) |
 | `pnpm seed` | the seed data in `docs/data/` does not load through the importers against the runner's stack (users → stage → import) |
-| `scripts/ci-env.sh` | writes the runner's `.env.test` (local URL + publishable key + the six logins from the seed's `credentials.127.0.0.1-54321.txt`) |
+| `scripts/ci-env.sh` | writes the runner's `.env.test` (local URL + publishable key + the six logins from the seed's `credentials.127.0.0.1-54321.txt`) — without it the integration suites would skip, and under `CI` skipping is a failure |
 | `supabase functions serve --env-file supabase/mock.env --no-verify-jwt` | the Edge Functions do not come up (the step waits for `dispatch-send` to answer `400 invalid_input`) |
 | `pnpm test` | any Vitest suite fails — the integration suites (`isolation`, `send-concurrency`, `ingestion`, `share-*`, `send-actions`, `health`) **fail instead of skipping under `CI`**; the provider mock starts in Vitest's `globalSetup` on 8787, where the served functions reach it through `host.docker.internal` |
 

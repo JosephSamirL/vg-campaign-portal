@@ -4,15 +4,17 @@
 # runner (the CLI's well-known demo keys, printed by `supabase status -o env`); the provider is tests/provider-mock.ts,
 # started by Vitest's globalSetup on port 8787 (supabase/mock.env points the served Edge Functions at
 # host.docker.internal:8787). No real provider batch is ever dispatched, no hosted project is ever touched, and
-# SUPABASE_SERVICE_ROLE_KEY / PROVIDER_API_KEY / DATABASE_URL never appear in this file — the seed and test steps
-# receive the runner's own local values through $GITHUB_ENV, which the "Local stack env" step fills at run time.
+# SUPABASE_SERVICE_ROLE_KEY / PROVIDER_API_KEY / DATABASE_URL never appear in this file as a value and are never a
+# repository secret — the seed and test steps receive the runner's own local values, by name, through $GITHUB_ENV,
+# which the "Local stack env" step fills at run time.
 name: ci
 
 on: [push, pull_request]
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # superseded pushes to a branch cancel each other; runs on main and on tags always finish
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/heads/main') && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   ci:
@@ -42,6 +44,12 @@ jobs:
       - name: Type-check
         run: pnpm exec tsc --noEmit
 
+      - name: Build (next build — segment-config / RSC-boundary errors only Next reports; dummy public env, no stack)
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: sb_publishable_ci_build_dummy
+        run: pnpm build
+
       - name: Schema drift (schema.sql must equal the concatenated migrations)
         run: |
           pnpm schema:dump
@@ -52,7 +60,7 @@ jobs:
         run: supabase start -x studio,imgproxy,mailpit,logflare,vector
 
       - name: Local stack env (demo keys of the runner's own stack — not secrets)
-        run: supabase status -o env | sed -e 's/^\([A-Z_0-9]*\)="\(.*\)"$/\1=\2/' >> "$GITHUB_ENV"
+        run: supabase status -o env | sed -n -e 's/^\([A-Z_0-9]*\)="\(.*\)"$/\1=\2/p' >> "$GITHUB_ENV"
 
       - name: Reset + pgTAP (supabase db reset && supabase test db)
         run: supabase db reset && supabase test db
@@ -60,7 +68,7 @@ jobs:
       - name: Seed the local stack (users → stage → import; credentials.<host>.txt stays on the runner)
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ env.API_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ env.SERVICE_ROLE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ env.SERVICE_ROLE_KEY || env.SECRET_KEY }}
           DATABASE_URL: ${{ env.DB_URL }}
         run: pnpm seed
 
@@ -71,7 +79,7 @@ jobs:
         run: |
           nohup supabase functions serve --env-file supabase/mock.env --no-verify-jwt > functions-serve.log 2>&1 &
           for i in $(seq 1 60); do
-            code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API_URL/functions/v1/dispatch-send" \
+            code="$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' -X POST "$API_URL/functions/v1/dispatch-send" \
                     -H "apikey: ${PUBLISHABLE_KEY:-$ANON_KEY}" -H 'Content-Type: application/json' -d '{' || true)"
             if [ "$code" = "400" ]; then echo "dispatch-send served (400 invalid_input on a malformed body)"; exit 0; fi
             sleep 2
