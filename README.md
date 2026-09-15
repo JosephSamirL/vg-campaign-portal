@@ -26,7 +26,7 @@ pnpm dev                     # http://localhost:3000
 
 | Command | What it does |
 |---|---|
-| `pnpm test` | Vitest (`tests/**/*.test.ts`) against the local stack |
+| `pnpm test` | Vitest (`tests/**/*.test.ts`) against the local stack — `tests/isolation.test.ts` needs `.env.test` (below) |
 | `pnpm test:db` | pgTAP suites in `supabase/tests/` |
 | `pnpm seed` | Loads the seed data (see *Seed load counts*) |
 | `pnpm schema:dump` | Regenerates `schema.sql` from `supabase/migrations/*.sql` |
@@ -34,6 +34,12 @@ pnpm dev                     # http://localhost:3000
 | `supabase db push` | Applies migrations to the hosted project |
 
 `schema.sql` at the repo root is the reproducible database definition: it is the concatenation of every migration, in order.
+
+`tests/isolation.test.ts` signs in as the KILELE analyst through PostgREST and asserts it sees only KILELE rows in every exposed table. It reads the git-ignored `.env.test`: `TEST_KILELE_ANALYST_EMAIL` / `TEST_KILELE_ANALYST_PASSWORD` (a **local-stack** password — `credentials.txt` holds whichever target `pnpm seed` ran last, so set a local one with the Admin API if needed) and, when `.env.local` points at the hosted project, `TEST_SUPABASE_URL` / `TEST_SUPABASE_PUBLISHABLE_KEY` for the local stack. Without `.env.test` the suite skips with a warning.
+
+## Sign-in
+
+`/login` offers email + password and "Continue with Google"; both are server actions (`app/(public)/login/actions.ts`). `proxy.ts` refreshes the Supabase session on every matched request and sends anonymous requests to `/login`; its matcher excludes `/share`, `/api/health`, `/login`, `/auth` and Next internals (`tests/proxy-matcher.test.ts`). `app/(portal)/layout.tsx` loads the caller's `app_users` row once per render (`lib/current-user.ts` — `role` is the single source for hiding owner controls) and signs out any session that has no row via `/auth/signout?reason=no_access`. The Google round-trip returns to `/auth/callback`: a refused account (sign-ups OFF) arrives as `?error=…` and lands on `/login?reason=not_allowed`; a pre-created one arrives as `?code=…` and lands on `/dashboard`.
 
 ## Manual Auth settings
 
@@ -120,6 +126,12 @@ _Grows with every attack test that lands._
 - **Policy rewritten to `using (true)`** — `drop policy brands_select_own_brand on public.brands; create policy brands_select_own_brand on public.brands for select to authenticated using (true);` → `not ok 3 - S2 policy references current_brand_id/auth.uid: public.brands` plus the same B3/B4 leak (three brands visible as brand A's owner). A dropped policy fails S2 identically.
 - **`grant select on public.brands to anon`** → `not ok 6 - S4 anon has no table privilege: public.brands`. The structural block runs as `postgres` before any role switch, so a grant is caught even though anon never queries anything in the test.
 - **A new `public` function with no explicit `revoke`** — `create function public.f_probe() returns int language sql security definer as $$ select 1 $$;` → `not ok 9 - S5 anon executes exactly the allow-list (Extra records: f_probe)`, same for S6 (`authenticated`) and `not ok 11 - S7 security definer functions are exactly the allow-list`. Finding: Postgres grants `execute` to `PUBLIC` on every new function, and a per-schema `alter default privileges … revoke` (what `0000_grants.sql` does) cannot subtract from that global default — so every function needs its own `revoke execute … from public, anon` (Story 1.2's helpers have it). The allow-list `set_eq` assertions are what make forgetting it fail the build.
+
+- **Six password logins, one wrong password** — each `*.owner@` / `*.analyst@vg-eval.test` login lands on `/dashboard` with its own brand name (Kilele Rides / Karoo Coaches / Marrakech Express) and an `Owner` / `Analyst` badge; a wrong password and an unknown email both re-render `/login` with the same inline "Email or password is incorrect." (the allow-list is not probeable through the form). Emails are trimmed and lowercased before `signInWithPassword`, so `  KILELE.OWNER@VG-EVAL.TEST  ` signs in.
+- **Signed-out `/dashboard`, `/`, `/campaigns/1`** → `307 /login`; **`/share/x` and `/api/health` signed out** → not redirected (404 until Epics 5/7 add them), and `/login`, `/auth/*`, `/_next/*` never bounce — the matcher regex is pinned by `tests/proxy-matcher.test.ts`. `/` with a session → `307 /dashboard`.
+- **Valid session, no `app_users` row** (local only: `delete from app_users where email = 'marrakech.analyst@vg-eval.test'`, sign in) → `/dashboard` → `307 /auth/signout?reason=no_access` → `303 /login?reason=no_access` ("Your account has no brand access. Contact Velocity Growth."), session cookie cleared (`Max-Age=0`). Row restored afterwards; 7 linked rows.
+- **Google refusal path** — `/auth/callback?error=access_denied&error_code=signup_disabled&error_description=Signups+not+allowed…` (what Auth sends for an unlisted Google account with sign-ups OFF) → `307 /login?reason=not_allowed` ("This Google account is not on the allow-list for this portal."), no session created; any other `error_code` → `reason=oauth_failed`; a bare `/auth/callback` → `/login`. With the Google provider still OFF, the button reaches Supabase's `/authorize`, which answers `400 validation_failed` — the live `joegmes@gmail.com` → KILELE Owner check waits on the Google Cloud OAuth client (Manual Auth settings).
+- **`tests/isolation.test.ts` with RLS disabled on `brands`** (`alter table public.brands disable row level security`) → `brands: exactly the analyst's own brand` fails with `expected [ 'KILELE', 'KAROO', 'MARRAKECH' ] to deeply equal [ 'KILELE' ]`; re-enabled → 6/6 pass. Anonymous PostgREST selects on every table return `42501` (permission denied), not empty arrays.
 
 ## Seed load counts
 

@@ -1,20 +1,13 @@
-import { updateSession } from "@/lib/supabase/proxy";
 import { type NextRequest } from "next/server";
+import { updateSession } from "@/lib/supabase/proxy";
 
 export async function proxy(request: NextRequest) {
   return await updateSession(request);
 }
 
 export const config = {
-  matcher: [
-    /*
-     * Match all request paths except:
-     * - _next/static (static files)
-     * - _next/image (image optimization files)
-     * - favicon.ico (favicon file)
-     * - images - .svg, .png, .jpg, .jpeg, .gif, .webp
-     * Feel free to modify this pattern to include more paths.
-     */
-    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
-  ],
+  // Everything except: /share/* (public results, Epic 5), /api/health (uptime probe, 7.2),
+  // /login and /auth/* (the sign-in round-trip itself), Next internals and the favicon.
+  // Tested by tests/proxy-matcher.test.ts — keep them in sync (architecture amendment #13).
+  matcher: ["/((?!share|api/health|login|auth|_next|favicon.ico).*)"],
 };
