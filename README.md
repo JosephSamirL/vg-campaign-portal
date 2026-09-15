@@ -41,11 +41,19 @@ _Filled in by the auth stories._
 
 ## Exposed schemas
 
-_Filled in by the tenancy story._
+The Data API (PostgREST) exposes only `public` and `graphql_public` — `supabase/config.toml` `[api] schemas = ["public", "graphql_public"]` locally, and the same list under Project Settings → Data API → Exposed schemas on the hosted project.
+
+`internal` (plpgsql helpers) and `staging` (raw seed rows) are created by `supabase/migrations/0000_grants.sql` with no `usage` for `public`, `anon` or `authenticated`. **They must never be added to the hosted Data API exposed schemas.** Nothing is ever created in `graphql_public`.
+
+`0000_grants.sql` also revokes Supabase's default privileges in `public`: new functions carry no `execute` for `public`/`anon`/`authenticated`, new tables and sequences carry nothing for `anon`/`authenticated`. Every grant is therefore explicit and visible in `schema.sql`.
 
 ## What we tried to break
 
 _Grows with every attack test that lands._
+
+- **anon reads `brands`** — `set role anon; select * from public.brands;` → `ERROR: permission denied for table brands`. The role holds no privilege on the table (RLS is not what stops it — there is nothing to filter); `0000_grants.sql` revoked the default table grant before the table existed and `0001_tenancy.sql` grants `select` to `authenticated` only.
+- **anon calls the isolation primitive** — `set role anon; select public.current_brand_id();` → `ERROR: permission denied for function current_brand_id`. Default `execute` for `public`/`anon`/`authenticated` was revoked in `0000_grants.sql`; `0001_tenancy.sql` re-revokes explicitly and grants `execute` to `authenticated` only (same for `current_app_role()`, and `app_users` behaves like `brands`).
+- **authenticated without a linked `app_users` row** — `set role authenticated; select count(*) from public.brands;` → `0`. Allowed, but `auth.uid()` is null, `current_brand_id()` returns null, and the forced-RLS policy `id = (select current_brand_id())` matches nothing. Zero rows, never a default brand.
 
 ## Seed load counts
 
