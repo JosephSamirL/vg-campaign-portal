@@ -1170,6 +1170,7 @@ export type Database = {
           unsubscribe_rate: number
         }[]
       }
+      health_ping: { Args: never; Returns: string }
       is_contactable: {
         Args: { c: Database["public"]["Tables"]["contacts"]["Row"] }
         Returns: boolean

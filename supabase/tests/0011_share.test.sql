@@ -86,8 +86,8 @@ select ok(not has_function_privilege('public', 'public.get_shared_results(text, 
 select set_eq(
   $$ select p.proname::text from pg_proc p join pg_namespace n on n.oid = p.pronamespace
      where n.nspname = 'public' and p.prokind = 'f' and has_function_privilege('anon', p.oid, 'execute') $$,
-  array['get_shared_results'],
-  'T8 anon may execute get_shared_results and nothing else in public');
+  array['get_shared_results', 'health_ping'],  -- Story 7.2 (0014_health.sql): health_ping, the invoker keep-alive probe, joins the anon set
+  'T8 anon may execute get_shared_results, health_ping and nothing else in public');
 
 -- structure of the timing defence: exactly one bcrypt call, against coalesce(link hash, dummy), dummy of the same cost
 select is((select count(*) from regexp_matches(p.prosrc, 'extensions\.crypt\(', 'g')), 1::bigint, 'T9 get_shared_results calls extensions.crypt exactly once (no branch skips the bcrypt)')

@@ -22,6 +22,7 @@ insert into t_exposed_schemas values ('public');
 
 create temp table t_allow_anon_exec(fn text);          -- 5.1: get_shared_results; 7.2: health_ping
 insert into t_allow_anon_exec values ('get_shared_results');  -- Story 5.1: the stranger's only door (secdef, volatile, returns a status row)
+insert into t_allow_anon_exec values ('health_ping');         -- Story 7.2 (0014_health.sql): the keep-alive probe behind /api/health (invoker, stable, select 'ok'; anon only)
 
 create temp table t_allow_auth_exec(fn text);
 insert into t_allow_auth_exec values ('current_brand_id'), ('current_app_role');
