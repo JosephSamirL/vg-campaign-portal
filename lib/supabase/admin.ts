@@ -1,3 +1,7 @@
+// Build-time fence: Next refuses to bundle this module into a Client Component (NFR-2).
+// `scripts/` run under `tsx --conditions=react-server` so the marker resolves to its empty
+// build there (see package.json `seed`); Vitest aliases it (vitest.config.ts).
+import "server-only";
 import { createClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/database.types";
 

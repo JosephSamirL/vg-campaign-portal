@@ -59,7 +59,7 @@ Sign-in is an allow-list (architecture D-9): the seven logins exist before anyon
 | `marrakech.analyst@vg-eval.test` | MARRAKECH | analyst |
 | `joegmes@gmail.com` (Google demo) | KILELE | owner |
 
-`pnpm seed` (`scripts/seed/users.ts`) then, for every `app_users` row: lowercases the email, looks the auth user up (`listUsers` match — `getUserByEmail` is not in supabase-js 2.116), creates it with `auth.admin.createUser({ email, password, email_confirm: true })` and a 32-char random password if absent, and writes `app_users.auth_user_id`. Existing users are skipped, never recreated or password-reset. Passwords go only to the git-ignored `credentials.txt` (`email<TAB>password<TAB>brand<TAB>role`, mode 0600; lines for pre-existing users are preserved). The console shows only `created` / `exists` / `linked` — never a password or key. Running it twice is a no-op.
+`pnpm seed` (`scripts/seed/users.ts`) then, for every `app_users` row: lowercases the email, looks the auth user up (`listUsers` match — `getUserByEmail` is not in supabase-js 2.116), creates it with `auth.admin.createUser({ email, password, email_confirm: true })` and a 32-char random password if absent, and writes `app_users.auth_user_id`. Existing users are skipped, never recreated or password-reset. Passwords go only to the git-ignored per-target `credentials.<host>.txt` (`credentials.127.0.0.1-54321.txt` for the local stack, `credentials.qaocabdpaxetofqcfgsa.supabase.co.txt` for hosted; `email<TAB>password<TAB>brand<TAB>role`, mode 0600). Each line is appended the moment `createUser` succeeds — before the link step — so a failure later in the run can never lose a password; the link asserts exactly one `app_users` row was updated before logging `linked`. The console shows the target host, then only `created` / `exists` / `linked` — never a password or key. Running it twice is a no-op.
 
 ```bash
 # LOCAL — seed.sql runs on `supabase db reset`; the local service key comes from `supabase status`
@@ -74,7 +74,7 @@ SUPABASE_SERVICE_ROLE_KEY="$(supabase projects api-keys --project-ref qaocabdpax
 pnpm seed
 ```
 
-Shell variables take precedence over `.env.local` (dotenv never overrides), so the same `.env.local` serves the app and both seed targets; always check which `NEXT_PUBLIC_SUPABASE_URL` is in effect before running `pnpm seed`. Whichever target ran last wrote its passwords to `credentials.txt` — keep the hosted copy for the submission email.
+Shell variables take precedence over `.env.local` (dotenv never overrides), so the same `.env.local` serves the app and both seed targets; the script prints the target host first, and each target writes its own `credentials.<host>.txt`, so a local run can never overwrite the hosted logins. The legacy single `credentials.txt` from the first hosted run (also git-ignored) still holds the hosted passwords — keep it (or the hosted per-host file) for the submission email.
 
 ### Hosted project (Dashboard → Authentication)
 

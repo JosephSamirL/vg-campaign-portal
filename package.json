@@ -7,7 +7,7 @@
     "lint": "eslint .",
     "test": "vitest run --passWithNoTests",
     "test:db": "supabase test db",
-    "seed": "tsx scripts/seed/index.ts",
+    "seed": "tsx --conditions=react-server scripts/seed/index.ts",
     "schema:dump": "bash scripts/schema-dump.sh",
     "gen:types": "supabase gen types typescript --local > lib/database.types.ts.tmp && mv lib/database.types.ts.tmp lib/database.types.ts"
   },
@@ -27,6 +27,7 @@
     "postgres": "^3.4.9",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "server-only": "^0.0.1",
     "tailwind-merge": "^3.3.0",
     "zod": "^4.6.5"
   },

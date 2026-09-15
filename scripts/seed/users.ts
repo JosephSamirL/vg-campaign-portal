@@ -4,11 +4,14 @@
 // script creates the matching auth users (`email_confirm: true`, so Google
 // later auto-links to the same verified email — D-9), links
 // `app_users.auth_user_id`, and appends generated passwords to the git-ignored
-// `credentials.txt`. Existing auth users are never recreated or password-reset.
-// Output is actions only (`created` / `exists` / `linked`) — never a password
-// or key.
+// per-target `credentials.<host>.txt` (one file per Supabase host, so a local
+// run never overwrites the hosted logins). Each line is appended the moment
+// `createUser` succeeds, before linking, so a later failure can never lose a
+// password. Existing auth users are never recreated or password-reset. Output
+// is actions only (`target` / `created` / `exists` / `linked`) — never a
+// password or key.
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import dotenv from "dotenv";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
@@ -21,7 +24,12 @@ type SeedRow = Pick<AppUserRow, "email" | "role" | "brand_id"> & {
 };
 type Admin = SupabaseClient<Database>;
 
-const CREDENTIALS_FILE = "credentials.txt";
+/** `credentials.<host>.txt` — host is the Supabase URL's hostname[-port], filename-safe. */
+export function credentialsFileFor(supabaseUrl: string): string {
+  const u = new URL(supabaseUrl);
+  const host = u.port ? `${u.hostname}-${u.port}` : u.hostname;
+  return `credentials.${host.replace(/[^A-Za-z0-9.-]/g, "-")}.txt`;
+}
 
 /** 24 random bytes → 32 base64url chars (AC requires ≥ 16). */
 export function generatePassword(): string {
@@ -74,6 +82,10 @@ async function findAuthUserByEmail(admin: Admin, email: string, cache: { users?:
 export async function provisionUsers(): Promise<void> {
   dotenv.config({ path: ".env.local", quiet: true });
   const admin = createAdminClient();
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!; // createAdminClient() threw if unset
+  const credentialsFile = credentialsFileFor(supabaseUrl);
+  const credentialsPath = path.resolve(process.cwd(), credentialsFile);
+  console.log("target", new URL(supabaseUrl).host, "→", credentialsFile);
 
   const { data: rows, error } = await admin
     .from("app_users")
@@ -84,10 +96,6 @@ export async function provisionUsers(): Promise<void> {
     throw new Error("app_users is empty — apply supabase/seed.sql to this database first");
   }
 
-  const credentialsPath = path.resolve(process.cwd(), CREDENTIALS_FILE);
-  const credentials = parseCredentials(
-    existsSync(credentialsPath) ? readFileSync(credentialsPath, "utf8") : undefined,
-  );
   const cache: { users?: Map<string, User> } = {};
 
   for (const row of rows as SeedRow[]) {
@@ -107,20 +115,26 @@ export async function provisionUsers(): Promise<void> {
         email_confirm: true,
       });
       if (createError || !data.user) throw new Error(`createUser ${email}: ${createError?.message ?? "no user returned"}`);
+      // Persist before anything else can fail: the auth user now exists and the script
+      // never resets passwords, so this is the only moment the password is recoverable.
+      appendFileSync(credentialsPath, credentialLine(email, password, brand, row.role) + "\n", { mode: 0o600 });
+      chmodSync(credentialsPath, 0o600); // `mode` applies only when the file is created
       console.log("created", email);
       id = data.user.id;
-      credentials.set(email, credentialLine(email, password, brand, row.role));
     }
 
-    const { error: linkError } = await admin
+    const { data: linked, error: linkError } = await admin
       .from("app_users")
       .update({ auth_user_id: id })
-      .eq("email", email);
+      .eq("email", email)
+      .select("email");
     if (linkError) throw new Error(`link ${email}: ${linkError.message}`);
+    if (!linked || linked.length !== 1) {
+      throw new Error(`link ${email}: expected exactly one app_users row updated, got ${linked?.length ?? 0}`);
+    }
     console.log("linked", email);
   }
 
-  const lines = [...credentials.values()];
-  writeFileSync(credentialsPath, lines.length ? lines.join("\n") + "\n" : "", { mode: 0o600 });
-  console.log(`${CREDENTIALS_FILE}: ${lines.length} line(s)`);
+  const known = existsSync(credentialsPath) ? parseCredentials(readFileSync(credentialsPath, "utf8")).size : 0;
+  console.log(`${credentialsFile}: ${known} login(s)`);
 }
