@@ -26,10 +26,12 @@ create temp table t_allow_auth_exec(fn text);
 insert into t_allow_auth_exec values ('current_brand_id'), ('current_app_role');
 insert into t_allow_auth_exec values ('is_contactable');   -- Story 3.1: security invoker, inlinable predicate (D-4)
 insert into t_allow_auth_exec values ('recipient_preview');   -- Story 4.1: secdef, brand-checked, raises not_in_brand / invalid_input
+insert into t_allow_auth_exec values ('confirm_send');        -- Story 4.2: secdef, owner-only + brand-checked; the only write path into sends
 
 create temp table t_allow_secdef(fn text);
 insert into t_allow_secdef values ('current_brand_id'), ('current_app_role');
 insert into t_allow_secdef values ('recipient_preview');      -- Story 4.1 (internal.recipient_classification has no grant and lives in internal: in neither list)
+insert into t_allow_secdef values ('confirm_send');           -- Story 4.2 (0007_confirm_send.sql)
 
 create temp table t_view_exceptions(relname text);     -- views without brand_id; each needs its own assertion
 
@@ -302,7 +304,14 @@ select is((select total_count + not_contactable + no_address + country_mismatch_
           'B11 recipient_preview counts reconcile to own non-deleted contacts');
 select throws_ok(format($$ select * from public.recipient_preview(%L) $$, current_setting('tenancy.campaign_b')), 'P0001', 'not_in_brand', 'B12 recipient_preview refuses brand B''s campaign (not_in_brand)');
 
+-- Story 4.2: confirm_send — as brand A's OWNER (the role check passes), brand B's real campaign id → not_in_brand,
+-- and no send was written for it. The fixture send on campaign B is 'complete', so the partial unique index is
+-- not what refuses here — the brand check is. (User B is an analyst: confirm_send would stop at not_owner.)
+select throws_ok(format($$ select public.confirm_send(%L, 1) $$, current_setting('tenancy.campaign_b')), 'P0001', 'not_in_brand', 'B13 confirm_send refuses brand B''s campaign (not_in_brand)');
+select throws_ok(format($$ select public.confirm_send(%L, null) $$, current_setting('tenancy.campaign_b')), 'P0001', 'not_in_brand', 'B13 confirm_send: the brand check precedes the count check');
+
 select pg_temp.as_postgres();
+select is((select count(*) from public.sends where campaign_id = current_setting('tenancy.campaign_b')::uuid), 1::bigint, 'B13 confirm_send wrote nothing for brand B''s campaign (only the complete fixture send)');
 select is(current_user::text, 'postgres', 'B9 role restored to postgres before finish');
 
 -- ============================================================================

@@ -927,6 +927,36 @@ export type Database = {
       }
     }
     Functions: {
+      confirm_send: {
+        Args: { p_campaign_id: string; p_expected_count: number }
+        Returns: {
+          accepted_count: number | null
+          batch_id: string | null
+          batch_key: string | null
+          body_sha256: string | null
+          brand_id: string
+          campaign_id: string
+          confirmed_at: string | null
+          confirmed_by: string | null
+          created_at: string
+          dispatch_attempts: number
+          dispatch_lease_until: string | null
+          dispatched_at: string | null
+          failure_reason: string | null
+          id: string
+          provider_responded_at: string | null
+          recipient_count: number
+          rejected_count: number | null
+          source: Database["public"]["Enums"]["send_source"]
+          status: Database["public"]["Enums"]["send_status"]
+        }
+        SetofOptions: {
+          from: "*"
+          to: "sends"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       current_app_role: {
         Args: never
         Returns: Database["public"]["Enums"]["app_role"]
