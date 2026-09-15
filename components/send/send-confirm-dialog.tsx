@@ -161,11 +161,12 @@ export function SendConfirmDialog({ campaignId, campaignLabel, sends = [], userE
 
   return (
     <>
-      <Button type="button" size="sm" onClick={() => onOpenChange(true)} data-testid="send-button">
+      <Button type="button" size="sm" className="h-11 w-full sm:h-8 sm:w-auto" onClick={() => onOpenChange(true)} data-testid="send-button">
         Send
       </Button>
       <Dialog open={open} onOpenChange={onOpenChange} dismissible={phase !== "submitting"} aria-labelledby="send-dialog-title" data-testid="send-dialog">
-        <DialogContent>
+        {/* `max-h-[90dvh] overflow-y-auto`: the confirm button stays reachable above an Android keyboard (Story 7.1) */}
+        <DialogContent className="max-h-[90dvh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle id="send-dialog-title">Send {campaignLabel}</DialogTitle>
             <DialogDescription>Review who this goes to, then confirm. The count you confirm is the count that is sent.</DialogDescription>

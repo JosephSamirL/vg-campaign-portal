@@ -28,6 +28,7 @@ pnpm dev                     # http://localhost:3000
 |---|---|
 | `pnpm test` | Vitest (`tests/**/*.test.ts`) against the local stack — `tests/isolation.test.ts` needs `.env.test` (below); the dispatch half of `tests/send-concurrency.test.ts` needs `dispatch-send` served against the provider mock (see *Dispatch*) and skips loudly otherwise |
 | `pnpm test:db` | pgTAP suites in `supabase/tests/` |
+| `pnpm lint` | `eslint .` (Next 16 removed `next lint`) — includes the `lib/supabase/admin` boundary (see *Continuous integration*) |
 | `pnpm seed` | Loads the seed data in one command (see *Seed load counts*): users → stage all eleven files → import contacts ×4 → campaigns ×3 → events ×3 → send log ×1 (Kilele, last), one `import_runs` row per file, one summary line per file, exit code 1 if any importer raises. Flags: `--only=users\|stage\|import\|all` (default `all`), `--sample=N`, `--file=<basename>`, `--entity=contacts\|campaigns\|events\|send_log` (import step); the stage and import steps need `DATABASE_URL` |
 | `pnpm schema:dump` | Regenerates `schema.sql` from `supabase/migrations/*.sql` |
 | `pnpm gen:types` | Regenerates `lib/database.types.ts` from the local database |
@@ -164,6 +165,56 @@ Delivery reports are fetched on a schedule and shown honestly. `0013_cron_poll.s
 **The pages.** `/campaigns` and `/campaigns/[id]` read `v_last_sync` (`Reports last synced 3 minutes ago`, the UTC instant in the title; the placeholder while the brand has no portal send) and `last_poll_status()`: a newest run outside `ok / requested / running` adds the muted line "Report sync has not succeeded since {last success | the portal went live}"; a failed read of either renders the destructive "Sync status unavailable" — three distinct states, never a fake "synced". Portal sends show live delivered / bounced / opened / clicked / unsubscribed counts and the view's rates beneath their campaign (list) and inside the send's history card (detail); a send with no report yet reads "No reports yet", not zeros.
 
 **Local loop.** `supabase functions serve --env-file supabase/mock.env --no-verify-jwt` serves both functions; `tests/ingestion.test.ts` builds a synthetic brand + a five-recipient send, records batch `B-ING-<n>`, programs the mock (`POST /__mock/batches/:batch_id { events, page_size, shuffle, duplicate_across_pages, released }`) and runs `poll-events` against it; `POST /__mock/config { events_status, events_fail_next, events_retry_after }` forces 503 / 429 / 401 / 404 on the report stream, `GET /__mock/reads` lists every GET the poller made. The two send suites share a `mkdir` lock (`.vitest-locks/`, git-ignored) so their batches never sit in one poll window. Hosted: `supabase functions deploy poll-events --no-verify-jwt`, `supabase secrets set DISPATCH_RETRY_ENABLED=on`, the two Vault secrets (`functions_url`, `cron_secret`), `supabase db push`; then `select * from internal.poll_log order by id desc limit 5` and `select jobname, active from cron.job`.
+
+## Reachability (Story 7.2)
+
+Vercel Hobby and Supabase Free both go quiet when nobody visits (architecture D-14): Supabase pauses a free project after a week without API activity, and nothing pg_cron does inside the database is documented to count as activity. Two probes keep the API side warm, and one human check is the real control:
+
+| What | Where | How |
+|---|---|---|
+| `GET /api/health` | `app/api/health/route.ts` | `@supabase/supabase-js` with `NEXT_PUBLIC_SUPABASE_URL` + the **publishable key only** (no session, never `lib/supabase/admin`, no service / provider / database secret — the ESLint boundary below makes an admin import a lint error), `rpc('health_ping')` → `200 {"ok":true,"db":"ok","at":"…"}` or `503 {"ok":false,"code":"db_unreachable"}`, always `Cache-Control: no-store`. Outside the session guard (`proxy.ts` matcher, `tests/proxy-matcher.test.ts`); unauthenticated by design — do **not** create a Vercel `CRON_SECRET` env (name clash with the Supabase Vault secret from Dispatch / Polling). Under Cache Components the route forces request-time rendering with `connection()` rather than `export const dynamic`. |
+| `public.health_ping()` | `supabase/migrations/0014_health.sql` | `select 'ok'`, `language sql stable security invoker set search_path = ''`, revoked from `public`, granted to **`anon` only** — the tenancy suite's exact anon set is `{get_shared_results, health_ping}` (`0001_tenancy.test.sql` S5, mirrored in `0011_share.test.sql` T8); `0014_health.test.sql` pins shape, grants and the answer as `anon` / the refusal as `authenticated`. |
+| Vercel cron | `vercel.json` | `{"crons":[{"path":"/api/health","schedule":"0 6 * * *"}]}` — once a day (Hobby: at most daily, may run up to an hour late). Listed under Vercel → Settings → Cron Jobs after the deploy. |
+| pg_cron | `0009` / `0013` | `dispatch-sweep`, `poll-events-5m`, `poll-events-hourly`, `poll-log-reconcile` keep the database busy every five minutes (unchanged by this story). |
+
+```bash
+curl -i https://vg-campaign-portal.vercel.app/api/health     # HTTP/2 200, cache-control: no-store, {"ok":true,"db":"ok","at":"…"}
+```
+
+### Call-day checklist
+
+The morning of the call, in this order (five minutes; everything below is read-only):
+
+1. **Project not paused** — Supabase Dashboard → project `qaocabdpaxetofqcfgsa` → it must read *Active*; if it shows *Paused*, click **Restore** and wait for *Active* (a couple of minutes), then continue.
+2. **`/api/health` returns 200** — `curl -i https://vg-campaign-portal.vercel.app/api/health` → `200` + `"db":"ok"` (a `503` means the database did not answer: go back to step 1). Vercel → Settings → Cron Jobs still lists `/api/health` at `0 6 * * *`.
+3. **Google sign-in** — open https://vg-campaign-portal.vercel.app/login, *Continue with Google* as `joegmes@gmail.com` → lands on the Kilele Rides dashboard with the *Owner* badge.
+4. **Share link + password opens** — the published Kilele campaign's `/share/<token>` from the submission note + its password → the results card renders (a wrong password says so, a revoked link says so).
+5. **Six logins** — each of `kilele.owner`, `kilele.analyst`, `karoo.owner`, `karoo.analyst`, `marrakech.owner`, `marrakech.analyst` `@vg-eval.test` (passwords in the hosted `credentials.<host>.txt` / the submission email) opens its own portal: its brand name in the header, its own campaigns, the owner / analyst badge.
+6. **The poller is alive** — Supabase Dashboard → SQL editor (`internal` is not exposed through the Data API, so this is the only place):
+
+   ```sql
+   select status, requested_at, finished_at, error from internal.poll_log order by requested_at desc limit 3;
+   ```
+
+   The newest row must be `ok` (or `requested` / `running` if a run is in flight) with `requested_at` inside the last hour; `failed` / `missing_secret` means the Vault secrets are gone (see *Polling the reports*), `no_response` means pg_net could not reach the function. The same answer through the app: `select * from public.last_poll_status();` as any signed-in user, and the *Reports last synced …* line on `/campaigns`.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request, on a fresh `ubuntu-latest` runner, **without a single secret**: the whole run targets the local Supabase stack that `supabase start` boots on the runner (the CLI's well-known demo keys, read at run time from `supabase status -o env`), and the provider is `tests/provider-mock.ts`. No real provider batch is ever dispatched, no hosted project is ever touched, and `SUPABASE_SERVICE_ROLE_KEY` / `PROVIDER_API_KEY` / `DATABASE_URL` never appear in the workflow file.
+
+| Step | Fails when |
+|---|---|
+| `pnpm install --frozen-lockfile` | the lockfile is out of date |
+| `pnpm lint` (`eslint .`) | any ESLint error — including the service boundary: `lib/supabase/admin` imported anywhere but `scripts/**` and `tests/**`, whatever the spelling (`eslint.config.mjs`, `no-restricted-imports`; proven by adding `import "@/lib/supabase/admin"` to the health route and watching `pnpm lint` fail; `tests/health.test.ts` re-proves it through ESLint's API) |
+| `pnpm exec tsc --noEmit` | a type error anywhere the app compiles (`supabase/functions` is Deno — `pnpm check:functions`) |
+| `pnpm schema:dump && git diff --exit-code -- schema.sql` | **schema drift**: `schema.sql` no longer equals the concatenation of `supabase/migrations/*.sql` (byte-deterministic, `LC_ALL=C` order, no timestamps) — a migration was edited or added without `pnpm schema:dump` in the same commit |
+| `supabase start` → `supabase db reset && supabase test db` | a migration does not apply from empty, or any pgTAP suite fails (the isolation test included) |
+| `pnpm seed` | the seed data in `docs/data/` does not load through the importers against the runner's stack (users → stage → import) |
+| `scripts/ci-env.sh` | writes the runner's `.env.test` (local URL + publishable key + the six logins from the seed's `credentials.127.0.0.1-54321.txt`) |
+| `supabase functions serve --env-file supabase/mock.env --no-verify-jwt` | the Edge Functions do not come up (the step waits for `dispatch-send` to answer `400 invalid_input`) |
+| `pnpm test` | any Vitest suite fails — the integration suites (`isolation`, `send-concurrency`, `ingestion`, `share-*`, `send-actions`, `health`) **fail instead of skipping under `CI`**; the provider mock starts in Vitest's `globalSetup` on 8787, where the served functions reach it through `host.docker.internal` |
+
+Pinned versions: Node from `.nvmrc`, pnpm 12, Supabase CLI 2.117.0 (the version the repo was developed against). Iterations so far: run 1 failed on a suite race (`share-link`'s `afterAll` signed the shared KILELE owner out **globally** and killed the dispatch suite's session — fixed with `scope: "local"`); the drift step was proven to fail by appending a comment to a migration without regenerating (`git diff --exit-code` → 1), then restored.
 
 ## Exposed schemas
 
@@ -368,6 +419,16 @@ _NFR-3: every portal page answers in under 2 s at the full load. **Local product
 | `/contacts?contactable=true&page=800` (page 800 of 1,026) | 57 ms | 58 ms |
 
 `explain analyze` of the `q=ami` page query as the analyst, under RLS through the `security_invoker` view: **72.9 ms** (brand-scoped scans; no extra index added — the trigram / `text_pattern_ops` indexes from `0002` are not what a contains-search uses, and the budget has 10× headroom). Same build, same session (3.2 / 3.4 review runs): `/dashboard` p50 42 ms / max 50 ms, `/campaigns` p50 42 ms / max 50 ms, `/campaigns/<id>` p50 31 ms / max 35 ms. `next dev` requests are 0.1–0.7 s and are not the measurement.
+
+## Mobile (Story 7.1)
+
+_NFR-4: every screen usable at 400 px — confirm and share especially. Checked headless (Chromium via Playwright in a scratch directory, not a project dependency) at **400 × 800**, `isMobile` + touch, against `pnpm dev` on the local stack with real sessions; the structural contract lives in `tests/mobile-nav.test.ts` and `tests/mobile-routes.test.ts`, the screenshots in the git-ignored `screenshots/`._
+
+- Below `md` the header keeps brand + role badge and a 44 × 44 px menu button; the links, email and sign-out move into a left `Sheet` (`components/ui/sheet.tsx`, a dependency-free native `<dialog>` with the shadcn API — no new package, like `dialog` / `tooltip` / `popover`). It closes on navigation, on Escape, on the backdrop and on ×.
+- Every table (`contacts`, `campaigns`, `imports` ×2, dashboard performance) declares a pixel `min-w-[…]` and scrolls inside the `Table` primitive's own `overflow-x-auto` wrapper; the portal `<main>` is `min-w-0`, so `document.documentElement.scrollWidth === window.innerWidth === 400` on every route (`/login`, `/dashboard` for Kilele and for Marrakech's empty chart, `/contacts` and `?q=zzzz`, `/campaigns`, `/campaigns/[id]` as owner and as the wrong brand, `/imports?run=`, `/share/<token>` before and after unlocking, the root 404).
+- Tiles stack (`grid-cols-1 sm:grid-cols-2`); the signups SVG scales to the card (`w-full min-w-0`) with its axis text hidden below `sm` (each bar keeps its `<title>`); the send-confirm and share-link dialogs are `max-h-[90dvh] overflow-y-auto` with stacked full-width buttons (596 px and 398 px tall at 400 × 800, confirm / submit visible); every `<input>` is 16 px below `md` (no iOS focus zoom); the viewport meta stays Next's default (`width=device-width, initial-scale=1`, no `maximum-scale`).
+- Copy on `/campaigns/[id]` is a plain `onClick` → `navigator.clipboard.writeText` → toast "Link copied"; when the clipboard is unavailable (no secure context, permission denied) the URL is selected in its read-only input and a toast + inline note say "Copy manually".
+- Three states per route, simulated without stopping the shared stack: a reverse proxy in front of `127.0.0.1:54321` that refuses every PostgREST call except `app_users` — dashboard → four `RetryAlert`s and no number, `/contacts` and `/imports` → their `error.tsx`, `/campaigns` → list + portal-sends alerts and "Sync status unavailable", `/campaigns/[id]` → "This campaign could not be loaded"; one Retry after the proxy heals recovers every route. Empty: `/contacts?q=zzzz`, Marrakech's "0 signups in the last 30 days — last signup …", `/campaigns/<other brand's id>` → the not-found tree; `/nope` → `app/not-found.tsx` (404, muted, a way back). Skeleton: each `loading.tsx` is the streamed Suspense fallback in every response. With the RPC refused, `/share/<token>` with the right password still answers the one sentence.
 
 ## Table / function inventory
 

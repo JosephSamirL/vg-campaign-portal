@@ -74,7 +74,7 @@ export function ImportIssuesTable({ runId, groups, issues, count, page, pageSize
         </p>
       ) : (
         <div className="overflow-x-auto">
-          <Table data-testid="import-issues-table">
+          <Table data-testid="import-issues-table" className="min-w-[640px]">
             <TableHeader>
               <TableRow>
                 <TableHead>File</TableHead>

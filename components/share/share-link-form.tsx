@@ -99,23 +99,31 @@ export function ShareLinkForm({ campaignId, campaignLabel }: { campaignId: strin
     });
   };
 
-  const copy = async (url: string) => {
+  /**
+   * Story 7.1 (AC3): a plain `onClick` — never `onMouseDown`, which a touch tap does not reliably fire
+   * — `navigator.clipboard.writeText` (secure context only: https or localhost) in try/catch; on
+   * failure the URL text is selected in the read-only input so a long-press "Copy" finishes the job,
+   * with the toast "Copy manually" and the inline note saying the same.
+   */
+  const copy = async (url: string, input: HTMLInputElement | null) => {
     try {
       await navigator.clipboard.writeText(url);
       toast.success("Link copied");
     } catch {
-      // no secure context / permission: the read-only input stays selectable by hand
-      setNotice({ code: "copy_failed", message: "Copying failed — select the link and copy it manually." });
+      input?.focus();
+      input?.select();
+      toast("Copy manually");
+      setNotice({ code: "copy_failed", message: "Copying failed — the link is selected; copy it manually." });
     }
   };
 
   return (
     <>
-      <Button type="button" size="sm" variant="outline" onClick={() => onOpenChange(true)} data-testid="publish-button">
+      <Button type="button" size="sm" variant="outline" className="h-11 w-full sm:h-8 sm:w-auto" onClick={() => onOpenChange(true)} data-testid="publish-button">
         Publish results
       </Button>
       <Dialog open={open} onOpenChange={onOpenChange} dismissible={!pending} aria-labelledby={titleId} data-testid="share-link-dialog">
-        <DialogContent>
+        <DialogContent className="max-h-[90dvh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle id={titleId}>Publish results for {campaignLabel}</DialogTitle>
             <DialogDescription>
@@ -176,7 +184,7 @@ export function ShareLinkForm({ campaignId, campaignLabel }: { campaignId: strin
             </form>
           ) : (
             <>
-              <ShareLinkCreatedPanel url={phase.url} onCopy={() => void copy(phase.url)} />
+              <ShareLinkCreatedPanel url={phase.url} onCopy={(input) => void copy(phase.url, input)} />
               <DialogFooter>
                 <Button type="button" onClick={() => onOpenChange(false)} data-testid="share-link-done">
                   Done
@@ -195,12 +203,22 @@ export function ShareLinkForm({ campaignId, campaignLabel }: { campaignId: strin
  * clipboard is unavailable), a Copy button, and the warning. Rendered exactly once per created
  * link; the parent discards the URL when the dialog closes.
  */
-export function ShareLinkCreatedPanel({ url, onCopy }: { url: string; onCopy: () => void }) {
+export function ShareLinkCreatedPanel({ url, onCopy }: { url: string; onCopy: (input: HTMLInputElement | null) => void }) {
+  const inputRef = useRef<HTMLInputElement>(null);
   return (
     <div className="flex flex-col gap-3" data-testid="share-link-created">
       <div className="flex flex-col gap-2 sm:flex-row">
-        <Input readOnly value={url} onFocus={(event) => event.currentTarget.select()} className="font-mono text-xs" aria-label="Share link" data-testid="share-link-url" />
-        <Button type="button" variant="secondary" onClick={onCopy} data-testid="share-link-copy">
+        {/* `text-base` below md (no iOS focus zoom); the URL scrolls inside the input */}
+        <Input
+          ref={inputRef}
+          readOnly
+          value={url}
+          onFocus={(event) => event.currentTarget.select()}
+          className="font-mono md:text-xs"
+          aria-label="Share link"
+          data-testid="share-link-url"
+        />
+        <Button type="button" variant="secondary" className="h-11 sm:h-9" onClick={() => onCopy(inputRef.current)} data-testid="share-link-copy">
           Copy
         </Button>
       </div>

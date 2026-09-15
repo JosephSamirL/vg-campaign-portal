@@ -38,11 +38,14 @@ export function dismiss(id: number) {
   emit();
 }
 
-export const toast = {
-  success: (message: string, options?: { duration?: number }) => push("success", message, options?.duration),
-  info: (message: string, options?: { duration?: number }) => push("info", message, options?.duration),
+type ToastOptions = { duration?: number };
+
+/** Sonner's call shape: `toast("…")` is the neutral toast, `toast.success` / `toast.info` the marked ones. */
+export const toast = Object.assign((message: string, options?: ToastOptions) => push("info", message, options?.duration), {
+  success: (message: string, options?: ToastOptions) => push("success", message, options?.duration),
+  info: (message: string, options?: ToastOptions) => push("info", message, options?.duration),
   dismiss,
-};
+});
 
 function subscribe(listener: () => void) {
   listeners.add(listener);

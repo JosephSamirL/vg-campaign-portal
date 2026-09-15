@@ -22,7 +22,11 @@ export function CampaignSection({ id, title, action, children }: CampaignSection
           <CardTitle id={headingId} className="text-lg">
             {title}
           </CardTitle>
-          {action && <div className="flex flex-wrap items-center gap-2" data-testid={`section-${id}-action`}>{action}</div>}
+          {action && (
+            <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto" data-testid={`section-${id}-action`}>
+              {action}
+            </div>
+          )}
         </CardHeader>
         <CardContent className="p-4 pt-0">{children}</CardContent>
       </Card>

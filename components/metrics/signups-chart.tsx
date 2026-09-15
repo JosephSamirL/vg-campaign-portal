@@ -48,20 +48,23 @@ export function SignupsChart({ label, days, window_start, window_end, future_dat
             {`0 signups in the last 30 days — ${last_signup_at ? `last signup ${formatDate(last_signup_at)}` : "no signups on record"}`}
           </p>
         ) : (
-          <div className="overflow-x-auto">
+          // `w-full min-w-0`: the SVG scales to the card at 400 px instead of forcing a page-wide scroll
+          // (Story 7.1, AC1); the axis text would shrink below legibility there, so it is hidden below `sm`
+          // — every bar keeps its `<title>` and the `aria-label` carries the totals.
+          <div className="w-full min-w-0" data-testid="chart-box">
             <svg
               viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
-              className="h-auto w-full min-w-[480px]"
+              className="h-auto w-full"
               role="img"
               aria-label={`${formatInt(total)} signups between ${window_start} and ${window_end} (UTC), busiest day ${formatInt(max)}`}
             >
               {/* recessive baseline + max tick */}
               <line x1={PAD_LEFT} x2={WIDTH} y1={PAD_TOP + PLOT_H} y2={PAD_TOP + PLOT_H} className="stroke-border" strokeWidth={1} />
               <line x1={PAD_LEFT} x2={WIDTH} y1={PAD_TOP} y2={PAD_TOP} className="stroke-border" strokeWidth={1} strokeDasharray="2 3" />
-              <text x={PAD_LEFT - 6} y={PAD_TOP + 4} textAnchor="end" className="fill-muted-foreground text-[10px]">
+              <text x={PAD_LEFT - 6} y={PAD_TOP + 4} textAnchor="end" className="hidden fill-muted-foreground text-[10px] sm:block" data-axis="y">
                 {formatInt(max)}
               </text>
-              <text x={PAD_LEFT - 6} y={PAD_TOP + PLOT_H} textAnchor="end" className="fill-muted-foreground text-[10px]">
+              <text x={PAD_LEFT - 6} y={PAD_TOP + PLOT_H} textAnchor="end" className="hidden fill-muted-foreground text-[10px] sm:block" data-axis="y">
                 0
               </text>
               {days.map((d, i) => {
@@ -81,7 +84,7 @@ export function SignupsChart({ label, days, window_start, window_end, future_dat
                       <title>{`${d.day}: ${d.signups}`}</title>
                     </rect>
                     {i % 5 === 0 && (
-                      <text x={x + BAR / 2} y={HEIGHT - 6} textAnchor="middle" className="fill-muted-foreground text-[10px]">
+                      <text x={x + BAR / 2} y={HEIGHT - 6} textAnchor="middle" className="hidden fill-muted-foreground text-[10px] sm:block" data-axis="x">
                         {formatUtcDate(d.day)}
                       </text>
                     )}

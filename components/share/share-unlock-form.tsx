@@ -32,7 +32,7 @@ export function ShareUnlockForm({ token }: { token: string }) {
   const failed = state !== null && !state.ok;
 
   return (
-    <Card>
+    <Card className="mx-auto w-full max-w-sm" data-testid="share-unlock-card">
       <CardHeader>
         <CardTitle className="text-2xl">Campaign results</CardTitle>
         <CardDescription>Enter the password you were given.</CardDescription>

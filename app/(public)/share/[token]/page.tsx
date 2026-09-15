@@ -15,7 +15,7 @@ export const instant = false;
 export default async function SharePage({ params }: { params: Promise<{ token: string }> }) {
   const { token } = await params;
   return (
-    <div className="flex min-h-svh w-full items-center justify-center p-6 md:p-10">
+    <div className="flex min-h-svh w-full items-center justify-center p-4 sm:p-6 md:p-10">
       <div className="flex w-full max-w-2xl flex-col gap-4">
         <ShareUnlockForm token={token} />
       </div>

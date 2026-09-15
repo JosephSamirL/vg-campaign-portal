@@ -34,7 +34,8 @@ function Dialog({ open, onOpenChange, dismissible = true, className, children, .
     <dialog
       ref={ref}
       className={cn(
-        "m-auto w-full max-w-lg rounded-lg border bg-background p-0 text-foreground shadow-lg backdrop:bg-black/50",
+        // `w-[calc(100%-2rem)]`: a 16 px gutter at phone width (Tailwind's `max-w-lg` replaces the UA's own inset) — Story 7.1
+        "m-auto w-[calc(100%-2rem)] max-w-lg rounded-lg border bg-background p-0 text-foreground shadow-lg backdrop:bg-black/50",
         className,
       )}
       onCancel={(event) => {

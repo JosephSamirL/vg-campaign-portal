@@ -31,7 +31,7 @@ type Props = { runs: ImportRunRow[]; selectedRunId?: string };
 export function ImportRunList({ runs, selectedRunId }: Props) {
   return (
     <div className="overflow-x-auto">
-      <Table data-testid="import-run-list">
+      <Table data-testid="import-run-list" className="min-w-[760px]">
         <TableHeader>
           <TableRow>
             <TableHead>File</TableHead>

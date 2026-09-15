@@ -46,10 +46,10 @@ export function ContactsFilters({ params }: { params: ContactsParams }) {
         </select>
       </label>
       <div className="flex gap-2">
-        <Button type="submit" size="default">
+        <Button type="submit" size="default" className="flex-1 sm:flex-none">
           Filter
         </Button>
-        <Button asChild variant="ghost">
+        <Button asChild variant="ghost" className="flex-1 sm:flex-none">
           <Link href="/contacts">Clear</Link>
         </Button>
       </div>

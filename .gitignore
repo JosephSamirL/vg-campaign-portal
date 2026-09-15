@@ -49,3 +49,6 @@ credentials.*.txt
 .env*
 !.env.example
 .vitest-locks/
+
+# Story 7.1 — 400 px audit screenshots (local, regenerated per run)
+/screenshots/

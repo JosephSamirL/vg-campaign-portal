@@ -73,7 +73,7 @@ export function SharedResultsCard({ data }: { data: SharedResultsRow }) {
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
-        <dl className="grid grid-cols-2 gap-4 sm:grid-cols-5">
+        <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-5">
           {COUNTS.map(([key, label]) => (
             <div key={key} className="flex flex-col gap-1" data-testid={`count-${key}`}>
               <dt className="text-xs text-muted-foreground">{label}</dt>

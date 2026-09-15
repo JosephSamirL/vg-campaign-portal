@@ -99,7 +99,7 @@ export default async function CampaignsPage() {
       ) : list.data.length === 0 ? (
         <EmptyState title="No campaigns loaded yet" description="Seed data has not been loaded for this brand." />
       ) : (
-        <Table data-testid="campaigns-table">
+        <Table data-testid="campaigns-table" className="min-w-[1120px]">
           <TableCaption>
             Campaign rows: {REPORTED_SOURCE_CAPTION}.{anyPortal && " Portal send rows: live figures from the provider's delivery reports."}
           </TableCaption>

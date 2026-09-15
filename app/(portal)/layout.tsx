@@ -21,7 +21,8 @@ export default async function PortalLayout({ children }: { children: React.React
   return (
     <div className="flex min-h-screen flex-col">
       <PortalNav brandName={me.brand_name} role={me.role} email={me.email} />
-      <main className="mx-auto w-full max-w-5xl flex-1 p-5">{children}</main>
+      {/* `min-w-0`: a wide table scrolls inside its own container, never the page (Story 7.1, AC1) */}
+      <main className="mx-auto w-full min-w-0 max-w-5xl flex-1 p-4 sm:p-5">{children}</main>
       {/* success toasts only (D-12); expected failures are inline alerts where they happen */}
       <Toaster />
     </div>

@@ -22,11 +22,12 @@ type Props = { rows: ContactRow[]; contactableRule: MetricRule | null };
  * "unknown" (muted), not as a blank that could be mistaken for "no". The "Contactable" header
  * carries the rule text (`MetricCaption`, Story 3.2 — `rule_text` from `metric_rules`, D-5) in
  * a popover that opens on hover and on tap (AC3). The `Table` primitive wraps the table in its
- * own `overflow-x-auto` container (AC7).
+ * own `overflow-x-auto` container (AC7); the `min-w-[960px]` keeps nine columns readable and makes
+ * the container — never the page — the thing that scrolls at 400 px (Story 7.1).
  */
 export function ContactsTable({ rows, contactableRule }: Props) {
   return (
-    <Table data-testid="contacts-table">
+    <Table data-testid="contacts-table" className="min-w-[960px]">
       <TableHeader>
         <TableRow>
           <TableHead>Name</TableHead>
