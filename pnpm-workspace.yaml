@@ -1,3 +1,4 @@
-allowBuilds:
-  esbuild: set this to true or false
-  unrs-resolver: set this to true or false
+# pnpm 10+/12 asks before running install scripts; these two are safe build steps.
+onlyBuiltDependencies:
+  - esbuild
+  - unrs-resolver

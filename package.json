@@ -9,7 +9,7 @@
     "test:db": "supabase test db",
     "seed": "tsx scripts/seed/index.ts",
     "schema:dump": "bash scripts/schema-dump.sh",
-    "gen:types": "supabase gen types typescript --local > lib/database.types.ts"
+    "gen:types": "supabase gen types typescript --local > lib/database.types.ts.tmp && mv lib/database.types.ts.tmp lib/database.types.ts"
   },
   "dependencies": {
     "@radix-ui/react-checkbox": "^1.3.1",

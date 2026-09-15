@@ -10,7 +10,7 @@ A multi-tenant campaign portal for three brands (Kilele Rides, Karoo Coaches, Ma
 - **Supabase**: Postgres 17 with row-level security, Auth (email + password, Google), Cron (pg_cron + pg_net), Edge Functions
 - **Tailwind CSS + shadcn/ui**
 - **Vitest** (app-level tests) + **pgTAP** via `supabase test db` (database-level tests)
-- Node 22 (`.nvmrc`), pnpm
+- Node 22 (`.nvmrc`), pnpm, Supabase CLI ≥ 2.117 (`brew install supabase/tap/supabase`), Docker (for the local stack)
 
 The deployed app uses only the publishable key; the service-role key and the provider key never reach Vercel or the browser.
 
