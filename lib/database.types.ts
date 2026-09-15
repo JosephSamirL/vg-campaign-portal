@@ -81,6 +81,240 @@ export type Database = {
         }
         Relationships: []
       }
+      campaigns: {
+        Row: {
+          as_of: string
+          brand_id: string
+          channel: string | null
+          created_at: string
+          external_id: string
+          file_rank: number
+          id: string
+          name: string | null
+          parent_campaign_id: string | null
+          parent_external_id: string | null
+          reported_bounced: number | null
+          reported_clicks: number | null
+          reported_delivered: number | null
+          reported_opens: number | null
+          reported_sent: number | null
+          send_local_time: string | null
+          sent_at: string | null
+          spend: number | null
+          target_country: string | null
+          updated_at: string
+        }
+        Insert: {
+          as_of?: string
+          brand_id: string
+          channel?: string | null
+          created_at?: string
+          external_id: string
+          file_rank?: number
+          id?: string
+          name?: string | null
+          parent_campaign_id?: string | null
+          parent_external_id?: string | null
+          reported_bounced?: number | null
+          reported_clicks?: number | null
+          reported_delivered?: number | null
+          reported_opens?: number | null
+          reported_sent?: number | null
+          send_local_time?: string | null
+          sent_at?: string | null
+          spend?: number | null
+          target_country?: string | null
+          updated_at?: string
+        }
+        Update: {
+          as_of?: string
+          brand_id?: string
+          channel?: string | null
+          created_at?: string
+          external_id?: string
+          file_rank?: number
+          id?: string
+          name?: string | null
+          parent_campaign_id?: string | null
+          parent_external_id?: string | null
+          reported_bounced?: number | null
+          reported_clicks?: number | null
+          reported_delivered?: number | null
+          reported_opens?: number | null
+          reported_sent?: number | null
+          send_local_time?: string | null
+          sent_at?: string | null
+          spend?: number | null
+          target_country?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "campaigns_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "brands"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "campaigns_parent_campaign_id_fkey"
+            columns: ["parent_campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      contacts: {
+        Row: {
+          as_of: string
+          brand_id: string
+          city: string | null
+          consent_marketing: boolean | null
+          country: string | null
+          created_at: string
+          deleted_at: string | null
+          email: string | null
+          external_id: string
+          file_rank: number
+          full_name: string | null
+          id: string
+          notes: string | null
+          phone: string | null
+          routed_from: string | null
+          signup_at: string | null
+          status: string | null
+          suppressed_at: string | null
+          suppressed_reason: string | null
+          suppressed_until: string | null
+          updated_at: string
+        }
+        Insert: {
+          as_of?: string
+          brand_id: string
+          city?: string | null
+          consent_marketing?: boolean | null
+          country?: string | null
+          created_at?: string
+          deleted_at?: string | null
+          email?: string | null
+          external_id: string
+          file_rank?: number
+          full_name?: string | null
+          id?: string
+          notes?: string | null
+          phone?: string | null
+          routed_from?: string | null
+          signup_at?: string | null
+          status?: string | null
+          suppressed_at?: string | null
+          suppressed_reason?: string | null
+          suppressed_until?: string | null
+          updated_at?: string
+        }
+        Update: {
+          as_of?: string
+          brand_id?: string
+          city?: string | null
+          consent_marketing?: boolean | null
+          country?: string | null
+          created_at?: string
+          deleted_at?: string | null
+          email?: string | null
+          external_id?: string
+          file_rank?: number
+          full_name?: string | null
+          id?: string
+          notes?: string | null
+          phone?: string | null
+          routed_from?: string | null
+          signup_at?: string | null
+          status?: string | null
+          suppressed_at?: string | null
+          suppressed_reason?: string | null
+          suppressed_until?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "contacts_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "brands"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      events: {
+        Row: {
+          batch_id: string | null
+          brand_id: string
+          campaign_id: string | null
+          channel: string | null
+          contact_id: string | null
+          created_at: string
+          event_id: string
+          id: number
+          occurred_at: string | null
+          raw: Json | null
+          send_id: string | null
+          source: Database["public"]["Enums"]["event_source"]
+          type: Database["public"]["Enums"]["event_type"]
+        }
+        Insert: {
+          batch_id?: string | null
+          brand_id: string
+          campaign_id?: string | null
+          channel?: string | null
+          contact_id?: string | null
+          created_at?: string
+          event_id: string
+          id?: never
+          occurred_at?: string | null
+          raw?: Json | null
+          send_id?: string | null
+          source: Database["public"]["Enums"]["event_source"]
+          type: Database["public"]["Enums"]["event_type"]
+        }
+        Update: {
+          batch_id?: string | null
+          brand_id?: string
+          campaign_id?: string | null
+          channel?: string | null
+          contact_id?: string | null
+          created_at?: string
+          event_id?: string
+          id?: never
+          occurred_at?: string | null
+          raw?: Json | null
+          send_id?: string | null
+          source?: Database["public"]["Enums"]["event_source"]
+          type?: Database["public"]["Enums"]["event_type"]
+        }
+        Relationships: [
+          {
+            foreignKeyName: "events_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "brands"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "events_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "events_contact_id_fkey"
+            columns: ["contact_id"]
+            isOneToOne: false
+            referencedRelation: "contacts"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never
@@ -91,9 +325,22 @@ export type Database = {
         Returns: Database["public"]["Enums"]["app_role"]
       }
       current_brand_id: { Args: never; Returns: string }
+      normalize_event_type: {
+        Args: { p: string }
+        Returns: Database["public"]["Enums"]["event_type"]
+      }
     }
     Enums: {
       app_role: "owner" | "analyst"
+      event_source: "seed" | "provider"
+      event_type:
+        | "delivered"
+        | "bounced"
+        | "opened"
+        | "clicked"
+        | "unsubscribed"
+        | "complained"
+        | "unknown"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -225,6 +472,16 @@ export const Constants = {
   public: {
     Enums: {
       app_role: ["owner", "analyst"],
+      event_source: ["seed", "provider"],
+      event_type: [
+        "delivered",
+        "bounced",
+        "opened",
+        "clicked",
+        "unsubscribed",
+        "complained",
+        "unknown",
+      ],
     },
   },
 } as const

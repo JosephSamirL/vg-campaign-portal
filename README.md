@@ -139,7 +139,18 @@ _Filled in after the seed load._
 
 ## Table / function inventory
 
-_Filled in as migrations land._
+_Grows as migrations land. Every `public` table: RLS enabled + forced, one `select` policy `brand_id = (select current_brand_id())` (or the row's own `auth.uid()`), `SELECT` to `authenticated` only, nothing to `anon`; writes only through RPCs / service role._
+
+| Object | Migration | Purpose / key |
+|---|---|---|
+| `public.brands`, `public.app_users`, `current_brand_id()`, `current_app_role()` | `0001_tenancy.sql` | tenancy primitives (Story 1.2) |
+| `public.contacts` | `0002_core_tables.sql` | normalised contacts; natural key `(brand_id, external_id)`; `status`/`consent_marketing`/`country`/`signup_at` nullable (unknown = `null`); `suppressed_at`/`suppressed_reason` set by Story 6.2's trigger; `deleted_at`/`suppressed_until` explicit; indexes `(brand_id, signup_at)`, `(brand_id, email text_pattern_ops)`, trigram on `full_name` |
+| `public.campaigns` | `0002_core_tables.sql` | seed campaigns + `reported_*` counts; natural key `(brand_id, external_id)`; `parent_external_id` raw pointer + `parent_campaign_id` self-FK; index `(brand_id, sent_at desc)` |
+| `public.events` | `0002_core_tables.sql` | seed + provider events in one vocabulary (`event_type` enum, `event_source` = `seed`/`provider`); natural key `(brand_id, source, event_id)`; `contact_id`/`campaign_id`/`send_id` nullable; indexes `(brand_id, contact_id, type)`, `(brand_id, campaign_id, type)` |
+| `public.normalize_event_type(text)` | `0002_core_tables.sql` | `bounce/open/click/unsubscribe/complaint` (and canonical spellings) → enum, case-insensitive after `btrim`, anything else (incl. `null`) → `unknown`; executable by no exposed role |
+| `staging.stage_contacts`, `stage_campaigns`, `stage_events`, `stage_send_log` | `0002_core_tables.sql` | raw CSV records (`cols text[]`, `ncols`, `source_file`, `file_brand`, `row_no`, `had_nul`, `as_of`, `file_rank`, `run_id`) in the unexposed `staging` schema — no policy, no grant |
+
+`0002_core_tables.sql` also opens with the schema-less `alter default privileges for role postgres revoke execute on functions from public` (Story-Time Amendment S17): a bare `create function public.f_probe()` now yields `has_function_privilege('anon', …) = false` — the per-schema line in `0000_grants.sql` could not subtract Postgres's built-in `PUBLIC` execute default. `supabase/tests/0002_core_tables.test.sql` re-runs that probe on every `pnpm test:db`.
 
 ## Repo layout
 

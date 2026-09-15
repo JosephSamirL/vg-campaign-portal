@@ -12,7 +12,18 @@ import type { Database } from "../lib/database.types";
  * TEST_KILELE_ANALYST_EMAIL / TEST_KILELE_ANALYST_PASSWORD and, when `.env.local`
  * points at the hosted project, TEST_SUPABASE_URL / TEST_SUPABASE_PUBLISHABLE_KEY.
  */
-export const TABLES = ["brands", "app_users"] as const satisfies readonly (keyof Database["public"]["Tables"])[];
+export const TABLES = ["brands", "app_users", "contacts", "campaigns", "events"] as const satisfies readonly (
+  keyof Database["public"]["Tables"]
+)[];
+
+/**
+ * Tables that are guaranteed to hold a KILELE row on the local stack. `brands`/`app_users`
+ * are filled by the migrations + seed; Story 2.1's `contacts`/`campaigns`/`events` are empty
+ * until Story 2.4 loads the seed files (move them here once it has). The own-brand > 0 proof
+ * for them lives in the pgTAP suite's fixtures meanwhile; the anonymous refusal and the
+ * "no foreign brand_id" checks below run for every table regardless.
+ */
+const SEEDED_TABLES: readonly (typeof TABLES)[number][] = ["brands", "app_users"];
 
 const OWN_BRAND = "KILELE";
 const OTHER_BRANDS = ["KAROO", "MARRAKECH"];
@@ -68,7 +79,7 @@ describe.skipIf(!configured)("brand isolation through PostgREST (KILELE analyst)
   it.each(TABLES)("%s: every visible row belongs to KILELE, zero KAROO/MARRAKECH rows", async (table) => {
     const { data, error } = await supabase.from(table).select("*");
     expect(error).toBeNull();
-    expect(data?.length ?? 0).toBeGreaterThan(0);
+    if (SEEDED_TABLES.includes(table)) expect(data?.length ?? 0).toBeGreaterThan(0);
     for (const row of data ?? []) {
       const r = row as Record<string, unknown>;
       if ("brand_id" in r) expect(r.brand_id).toBe(ownBrandId);

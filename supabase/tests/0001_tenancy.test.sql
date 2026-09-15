@@ -7,6 +7,10 @@
 --
 -- Runs as postgres via `supabase test db` (pg_prove). Everything is inside one transaction that
 -- is rolled back, so fixture users never persist.
+--
+-- Catalog blocks order by the object name, never by the ok() text (`order by 1` sorts "ok 10" before
+-- "ok 6" once a block crosses test #10 and pg_prove rejects the out-of-sequence TAP — Story 2.1).
+-- Postgres postpones the volatile ok() until after the Sort, so numbering follows the output order.
 
 begin;
 create extension if not exists pgtap with schema extensions;
@@ -55,6 +59,20 @@ begin
          ('fixture-b@tenancy.test', bb, 'analyst', ub);
 
   -- Story 2.1+: insert one row per brand into every new tenant table here
+  -- Story 2.1: contacts / campaigns / events — one row per brand; the event links to that brand's own contact + campaign.
+  insert into public.contacts (brand_id, external_id, full_name, email, signup_at)
+  values (ba, 'CT-A1', 'Fixture Contact A', 'ct-a1@tenancy.test', now()),
+         (bb, 'CT-B1', 'Fixture Contact B', 'ct-b1@tenancy.test', now());
+  insert into public.campaigns (brand_id, external_id, name, channel, sent_at)
+  values (ba, 'CMP-A1', 'Fixture Campaign A', 'email', now()),
+         (bb, 'CMP-B1', 'Fixture Campaign B', 'email', now());
+  insert into public.events (brand_id, source, event_id, type, contact_id, campaign_id, occurred_at)
+  values (ba, 'seed', 'EV-A1', 'opened',
+          (select id from public.contacts where brand_id = ba and external_id = 'CT-A1'),
+          (select id from public.campaigns where brand_id = ba and external_id = 'CMP-A1'), now()),
+         (bb, 'seed', 'EV-B1', 'opened',
+          (select id from public.contacts where brand_id = bb and external_id = 'CT-B1'),
+          (select id from public.campaigns where brand_id = bb and external_id = 'CMP-B1'), now());
 end $$;
 
 -- Supabase's documented RLS-test pattern: request.jwt.claims + role authenticated, transaction-local.
@@ -91,6 +109,10 @@ begin
   end loop;
 end $$;
 
+-- Story 2.1 (S17): 0002_core_tables.sql revokes the PUBLIC execute default for every function postgres
+-- creates — pg_temp helpers included — so the two helpers the authenticated block calls need an explicit grant.
+grant execute on function pg_temp.brand_counts(), pg_temp.as_postgres() to public;
+
 -- ============================================================================
 -- Structural assertions — as postgres, before any role switch.
 -- One TAP line per catalog row so a failure names the offending object.
@@ -102,7 +124,7 @@ from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
 where c.relkind in ('r', 'p')
   and n.nspname in (select nspname from t_exposed_schemas)
-order by 1;
+order by n.nspname, c.relname;
 
 -- S2: every table has >= 1 policy whose qual / with_check references current_brand_id or auth.uid.
 -- pg_policies.qual is null for with-check-only policies, hence the coalesce concat.
@@ -117,7 +139,7 @@ from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
 where c.relkind in ('r', 'p')
   and n.nspname in (select nspname from t_exposed_schemas)
-order by 1;
+order by n.nspname, c.relname;
 
 -- S3: every view runs with security_invoker (otherwise it reads the base tables as its owner, bypassing RLS).
 select ok(
@@ -130,7 +152,7 @@ from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
 where c.relkind = 'v'
   and n.nspname in (select nspname from t_exposed_schemas)
-order by 1;
+order by n.nspname, c.relname;
 
 -- S3b: every view exposes brand_id (so brand_counts() covers it) or is listed in t_view_exceptions
 -- (and then owes its own assertion below the per-RPC negatives block).
@@ -142,7 +164,7 @@ from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
 where c.relkind = 'v'
   and n.nspname in (select nspname from t_exposed_schemas)
-order by 1;
+order by n.nspname, c.relname;
 
 -- S4: anon holds no privilege at all on any table or view.
 -- has_table_privilege with a comma list is true if ANY of the listed privileges is held.
@@ -153,7 +175,7 @@ from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
 where c.relkind in ('r', 'p', 'v', 'm')
   and n.nspname in (select nspname from t_exposed_schemas)
-order by 1;
+order by n.nspname, c.relname;
 
 -- S4b: authenticated never writes a table or view directly (writes go through RPCs).
 select ok(
@@ -163,7 +185,7 @@ from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
 where c.relkind in ('r', 'p', 'v', 'm')
   and n.nspname in (select nspname from t_exposed_schemas)
-order by 1;
+order by n.nspname, c.relname;
 
 -- S5: the functions anon may execute are exactly t_allow_anon_exec.
 select set_eq(
@@ -211,7 +233,7 @@ select ok(
   format('S11 %s has no usage on schema %s', r.rolname, s.nspname))
 from (values ('anon'), ('authenticated')) r(rolname)
 cross join (values ('internal'), ('staging')) s(nspname)
-order by 1;
+order by r.rolname, s.nspname;
 
 -- ============================================================================
 -- Behavioural block — as brand A's owner (user A). FR-32: brand B rows = 0 everywhere.
