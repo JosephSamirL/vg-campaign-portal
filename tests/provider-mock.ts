@@ -12,19 +12,36 @@ import { fileURLToPath } from "node:url";
  *                                       same accepted/rejected). New key → batch_id 'mock-<n>', accepted =
  *                                       the normalised recipient ids minus state.reject_ids, rejected = the
  *                                       rest; the recipients are stored and the delivery events pre-generated.
- *   GET  /v1/messages/:batch_id/events  ?since=<event_id> | ?cursor=<opaque>. ≤ page_size (1000) per page,
- *                                       { events, next_cursor, has_more }; shuffled within the page; every page
- *                                       after the first repeats ~10 % of the previous page (duplicates across
- *                                       pages, never lost events).
+ *   GET  /v1/messages/:batch_id/events  ?since=<next_cursor | event_id> (or ?cursor=<opaque>). ≤ page_size (1000)
+ *                                       per page, { events, next_cursor, has_more }; shuffled within the page; every
+ *                                       page after the first repeats ~10 % of the previous page (duplicates across
+ *                                       pages, never lost events). Probe semantics (docs/provider-api.md, rows b, c, f):
+ *                                       `since` is honoured only when it is one of THIS batch's cursors — an event id,
+ *                                       a bogus value or another batch's cursor restarts the stream from the top (200,
+ *                                       never 400); `next_cursor` is null once `has_more` is false. A programmed batch
+ *                                       (below) answers `has_more = true` with an empty page and an unchanged cursor
+ *                                       while not every source event is `released` — the open stream of row c.
  *   GET  /healthz                       {} (no auth), like the real one.
+ *   POST /__mock/batches/:batch_id      { events, page_size?, shuffle?, duplicate_across_pages?, released? } — Story 6.3:
+ *                                       program a batch's report stream by hand (creating the batch if the POST never
+ *                                       happened, e.g. one recorded straight into the DB): `events` are served in
+ *                                       that order (shuffled per page when `shuffle`), `page_size` overrides the global
+ *                                       one for this batch, `duplicate_across_pages` (default true) repeats ~10 % of the
+ *                                       previous page, `released` caps how many source events are visible (default all)
+ *                                       — raise it between two poll runs to release the second half of the stream.
  *   POST /__mock/reset                  forget every batch, call and override.
- *   POST /__mock/config                 { status?, reject_ids?, latency_ms?, page_size?, blank_body? } — `status`
- *                                       forces the next POSTs to answer that code (e.g. 500 / 422) WITHOUT storing
- *                                       anything for the key (a failed call is not an idempotent success);
- *                                       `blank_body` accepts and STORES the batch for the key but answers 200 with
- *                                       an empty body — the "provider committed, the response was lost" crash drill
- *                                       (a replay of the key then returns the stored batch_id).
+ *   POST /__mock/config                 { status?, reject_ids?, latency_ms?, page_size?, blank_body?, events_status?,
+ *                                       events_fail_next?, events_retry_after? } — `status` forces the next POSTs to
+ *                                       answer that code (e.g. 500 / 422) WITHOUT storing anything for the key (a
+ *                                       failed call is not an idempotent success); `blank_body` accepts and STORES the
+ *                                       batch for the key but answers 200 with an empty body — the "provider
+ *                                       committed, the response was lost" crash drill (a replay of the key then
+ *                                       returns the stored batch_id). Story 6.3: `events_status` forces the next
+ *                                       `events_fail_next` GET /events (default: every one while set) to answer that
+ *                                       code with the probe's error body — a 429 / 503 carries `Retry-After:
+ *                                       <events_retry_after>` (header AND body `retry_after`, default 1 s).
  *   GET  /__mock/calls                  [{ key, batch_id, status }] — every POST /v1/messages seen, in order.
+ *   GET  /__mock/reads                  [{ batch_id, since, status, events, has_more }] — every GET /events seen.
  *
  * `startProviderMock(port)` for Vitest's globalSetup (tests/global-setup.ts); standalone: `pnpm tsx
  * tests/provider-mock.ts` (PROVIDER_MOCK_PORT, default 8787) while `supabase functions serve` points at it
@@ -34,13 +51,39 @@ export type MockRecipientEcho = string | { id?: string; external_id?: string; co
 
 export type MockEvent = { event_id: string; type: "delivered" | "opened" | "bounced" | "unsubscribed"; external_id: string; occurred_at: string };
 
+/** A programmed event (Story 6.3): anything JSON — the poller must survive a `weird` type or a foreign recipient. */
+export type ProgrammedEvent = Record<string, unknown>;
+
+export type BatchProgram = {
+  events: ProgrammedEvent[];
+  page_size?: number;
+  shuffle?: boolean;
+  duplicate_across_pages?: boolean;
+  /** How many of `events` (in canonical order) are visible; the rest are "not yet reported" — the stream stays open. */
+  released?: number;
+};
+
 export type MockCall = { key: string | null; batch_id: string | null; status: number; recipients: number; replay: boolean };
 
 type StoredResponse = { status: number; body: unknown };
 
-type Batch = { batch_id: string; recipients: string[]; accepted: string[]; rejected: string[]; events: MockEvent[]; created_at: string };
+type Batch = { batch_id: string; recipients: string[]; accepted: string[]; rejected: string[]; events: MockEvent[]; created_at: string; program?: Required<BatchProgram> };
 
-export type MockConfig = { status?: number | null; reject_ids?: string[]; latency_ms?: number; page_size?: number; blank_body?: boolean };
+export type MockConfig = {
+  status?: number | null;
+  reject_ids?: string[];
+  latency_ms?: number;
+  page_size?: number;
+  blank_body?: boolean;
+  /** Story 6.3: force GET /events to answer this code (429 / 503 with Retry-After; 401 / 404 / 500 with the probe's bodies). */
+  events_status?: number | null;
+  /** How many GETs answer `events_status` before the stream is served again; 0 / absent = every one while it is set. */
+  events_fail_next?: number;
+  /** Seconds in `Retry-After` (header + body) for a forced 429 / 503. */
+  events_retry_after?: number;
+};
+
+export type MockRead = { batch_id: string; since: string | null; status: number; events: number; has_more: boolean | null };
 
 const DEFAULT_PAGE_SIZE = 1000;
 
@@ -48,12 +91,17 @@ export type ProviderMockState = {
   byKey: Map<string, StoredResponse>;
   batches: Map<string, Batch>;
   calls: MockCall[];
+  reads: MockRead[];
   config: Required<MockConfig>;
   counter: number;
 };
 
+export function freshConfig(): Required<MockConfig> {
+  return { status: null, reject_ids: [], latency_ms: 0, page_size: DEFAULT_PAGE_SIZE, blank_body: false, events_status: null, events_fail_next: 0, events_retry_after: 1 };
+}
+
 export function freshState(): ProviderMockState {
-  return { byKey: new Map(), batches: new Map(), calls: [], config: { status: null, reject_ids: [], latency_ms: 0, page_size: DEFAULT_PAGE_SIZE, blank_body: false }, counter: 0 };
+  return { byKey: new Map(), batches: new Map(), calls: [], reads: [], config: freshConfig(), counter: 0 };
 }
 
 /** The provider keys a recipient on id / external_id / contact_id / recipient_id / email. */
@@ -120,20 +168,57 @@ function decodeCursor(cursor: string): { b: string; o: number } | null {
   return null;
 }
 
+export type EventsPageResponse = { events: Array<MockEvent | ProgrammedEvent>; next_cursor: string | null; has_more: boolean };
+
 /**
  * One page of a batch's events, positional. `offset` = how many events (in canonical order) precede this page.
  * Pages after the first prepend ~10 % of the previous page again (duplicates across pages); the page is
- * shuffled; `next_cursor` is opaque and null once `has_more` is false.
+ * shuffled; `next_cursor` is opaque and null once `has_more` is false (probe row c).
+ *
+ * A programmed batch serves its `events` (its own page size / shuffle / duplicate knobs) up to `released`: past that
+ * point the stream is OPEN but empty — `has_more: true`, no events, and the SAME cursor back (probe row c, e3:
+ * "has_more means the report stream is still open, not that another page exists"). The cursor is issued at the
+ * offset the next page starts from, so a stale cursor kept across runs still returns the items released later
+ * (e10 / e15) and a cursor is never wiped by the mock.
  */
-export function eventsPage(batch: Batch, offset: number, pageSize: number): { events: MockEvent[]; next_cursor: string | null; has_more: boolean } {
-  const all = batch.events;
-  const slice = all.slice(offset, offset + pageSize);
-  const dupCount = offset > 0 ? Math.max(1, Math.floor(slice.length / 10)) : 0;
-  const dups = offset > 0 ? all.slice(Math.max(0, offset - dupCount), offset) : [];
-  const page = shuffled([...dups, ...slice], hashString(`${batch.batch_id}:${offset}`));
-  const nextOffset = offset + slice.length;
+export function eventsPage(batch: Batch, offset: number, pageSize: number): EventsPageResponse {
+  const program = batch.program;
+  const all: Array<MockEvent | ProgrammedEvent> = program ? program.events : batch.events;
+  const visible = program ? Math.min(program.released, all.length) : all.length;
+  const size = program ? program.page_size : pageSize;
+  const duplicate = program ? program.duplicate_across_pages : true;
+  const shuffle = program ? program.shuffle : true;
+  const start = Math.min(offset, visible);
+  const slice = all.slice(start, Math.min(start + size, visible));
+  // nothing new → nothing to repeat: an open stream with nothing released yet is an EMPTY page (probe e3)
+  const dupCount = duplicate && start > 0 && slice.length > 0 ? Math.max(1, Math.floor(slice.length / 10)) : 0;
+  const dups = dupCount > 0 ? all.slice(Math.max(0, start - dupCount), start) : [];
+  const raw = [...dups, ...slice];
+  const page = shuffle ? shuffled(raw, hashString(`${batch.batch_id}:${start}`)) : raw;
+  const nextOffset = start + slice.length;
+  if (program) {
+    // the stream stays open until every source event has been released (and served); then it closes with a null cursor
+    const closed = nextOffset >= all.length;
+    return { events: page, next_cursor: closed ? null : encodeCursor(batch.batch_id, nextOffset), has_more: !closed };
+  }
   const hasMore = nextOffset < all.length;
   return { events: page, next_cursor: hasMore ? encodeCursor(batch.batch_id, nextOffset) : null, has_more: hasMore };
+}
+
+/** Normalise a `POST /__mock/batches/:id` body; `events` must be an array of objects. */
+export function parseBatchProgram(raw: unknown): Required<BatchProgram> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const body = raw as BatchProgram;
+  if (!Array.isArray(body.events) || !body.events.every((e) => e && typeof e === "object" && !Array.isArray(e))) return null;
+  const pageSize = typeof body.page_size === "number" && body.page_size >= 1 ? Math.floor(body.page_size) : DEFAULT_PAGE_SIZE;
+  const released = typeof body.released === "number" && body.released >= 0 ? Math.floor(body.released) : body.events.length;
+  return {
+    events: body.events,
+    page_size: pageSize,
+    shuffle: body.shuffle !== false,
+    duplicate_across_pages: body.duplicate_across_pages !== false,
+    released,
+  };
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -172,6 +257,7 @@ export function createProviderMock(state: ProviderMockState = freshState()): { s
         state.byKey = fresh.byKey;
         state.batches = fresh.batches;
         state.calls = fresh.calls;
+        state.reads = fresh.reads;
         state.config = fresh.config;
         state.counter = 0;
         return send(res, 200, { ok: true });
@@ -184,9 +270,33 @@ export function createProviderMock(state: ProviderMockState = freshState()): { s
         if (typeof patch.latency_ms === "number") state.config.latency_ms = Math.max(0, patch.latency_ms);
         if (typeof patch.page_size === "number") state.config.page_size = Math.min(DEFAULT_PAGE_SIZE, Math.max(1, Math.floor(patch.page_size)));
         if (typeof patch.blank_body === "boolean") state.config.blank_body = patch.blank_body;
+        if ("events_status" in patch) state.config.events_status = typeof patch.events_status === "number" ? patch.events_status : null;
+        if (typeof patch.events_fail_next === "number") state.config.events_fail_next = Math.max(0, Math.floor(patch.events_fail_next));
+        if (typeof patch.events_retry_after === "number") state.config.events_retry_after = Math.max(0, patch.events_retry_after);
         return send(res, 200, state.config);
       }
       if (url.pathname === "/__mock/calls" && method === "GET") return send(res, 200, state.calls);
+      if (url.pathname === "/__mock/reads" && method === "GET") return send(res, 200, state.reads);
+      const programMatch = url.pathname.match(/^\/__mock\/batches\/([^/]+)$/);
+      if (programMatch && method === "POST") {
+        // Story 6.3: program (or re-program) one batch's report stream; creates the batch when the POST never happened
+        const batchId = decodeURIComponent(programMatch[1]);
+        const raw = await readBody(req);
+        let parsed: unknown;
+        try {
+          parsed = raw ? JSON.parse(raw) : {};
+        } catch {
+          return send(res, 400, { error: "invalid_json", message: "body must be JSON" });
+        }
+        const program = parseBatchProgram(parsed);
+        if (!program) return send(res, 400, { error: "invalid_program", message: "events must be an array of objects" });
+        const existing = state.batches.get(batchId);
+        const recipients = [...new Set(program.events.map((e) => normaliseRecipient(e as MockRecipientEcho)).filter((id): id is string => typeof id === "string"))];
+        const batch: Batch = existing ?? { batch_id: batchId, recipients, accepted: recipients, rejected: [], events: [], created_at: new Date().toISOString() };
+        batch.program = program;
+        state.batches.set(batchId, batch);
+        return send(res, 200, { batch_id: batchId, events: program.events.length, released: program.released, page_size: program.page_size, shuffle: program.shuffle, duplicate_across_pages: program.duplicate_across_pages });
+      }
       if (url.pathname === "/__mock/batches" && method === "GET") {
         return send(res, 200, [...state.batches.values()].map((b) => ({ batch_id: b.batch_id, recipients: b.recipients.length, accepted: b.accepted.length, rejected: b.rejected.length, events: b.events.length })));
       }
@@ -250,20 +360,41 @@ export function createProviderMock(state: ProviderMockState = freshState()): { s
 
       const events = url.pathname.match(/^\/v1\/messages\/([^/]+)\/events$/);
       if (events && method === "GET") {
-        const batch = state.batches.get(decodeURIComponent(events[1]));
-        if (!batch) return send(res, 404, { error: "not_found", message: "unknown batch_id" });
-        let offset = 0;
-        const cursor = url.searchParams.get("cursor");
-        const since = url.searchParams.get("since");
-        if (cursor) {
-          const decoded = decodeCursor(cursor);
-          if (!decoded || decoded.b !== batch.batch_id) return send(res, 400, { error: "invalid_cursor", message: "cursor does not belong to this batch" });
-          offset = Math.min(decoded.o, batch.events.length);
-        } else if (since) {
-          const index = batch.events.findIndex((e) => e.event_id === since);
-          offset = index >= 0 ? index + 1 : 0; // an unknown `since` restarts from the beginning (the real one may differ: probe, 6.1)
+        const requestedId = decodeURIComponent(events[1]);
+        const sinceParam = url.searchParams.get("since") ?? url.searchParams.get("cursor");
+        // a forced status on the report stream (Story 6.3 drills): the probe's error shapes, Retry-After on 429 / 503
+        if (state.config.events_status !== null && state.config.events_status !== 200) {
+          const forced = state.config.events_status;
+          if (state.config.events_fail_next > 0 && --state.config.events_fail_next === 0) state.config.events_status = null;
+          state.reads.push({ batch_id: requestedId, since: sinceParam, status: forced, events: 0, has_more: null });
+          if (forced === 429 || forced === 503) {
+            const wait = state.config.events_retry_after;
+            const body = forced === 429
+              ? { error: "rate_limited", message: "too many requests", retry_after: wait }
+              : { error: "service_unavailable", message: "reports temporarily unavailable", retry_after: wait };
+            const text = JSON.stringify(body);
+            res.writeHead(forced, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(text), "Retry-After": String(wait) });
+            return res.end(text);
+          }
+          if (forced === 401) return send(res, 401, { error: "unauthorized", message: "Provide your API key as 'Authorization: Bearer <key>' or 'X-API-Key: <key>'." });
+          if (forced === 404) return send(res, 404, { error: "not_found", message: "unknown batch_id" });
+          return send(res, forced, { error: `forced_${forced}`, message: `mock forced status ${forced}` });
         }
-        return send(res, 200, eventsPage(batch, offset, state.config.page_size));
+        const batch = state.batches.get(requestedId);
+        if (!batch) {
+          state.reads.push({ batch_id: requestedId, since: sinceParam, status: 404, events: 0, has_more: null });
+          return send(res, 404, { error: "not_found", message: "unknown batch_id" });
+        }
+        // probe rows b / f: `since` (or `cursor`) is honoured only when it is one of THIS batch's opaque cursors; an
+        // event id, a bogus value or another batch's cursor is ignored — the full stream again, 200, never a 400
+        let offset = 0;
+        if (sinceParam) {
+          const decoded = decodeCursor(sinceParam);
+          if (decoded && decoded.b === batch.batch_id) offset = decoded.o;
+        }
+        const page = eventsPage(batch, offset, state.config.page_size);
+        state.reads.push({ batch_id: batch.batch_id, since: sinceParam, status: 200, events: page.events.length, has_more: page.has_more });
+        return send(res, 200, page);
       }
 
       return send(res, 404, { error: "not_found", message: `${method} ${url.pathname}` });

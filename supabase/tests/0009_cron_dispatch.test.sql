@@ -29,7 +29,9 @@ select ok(not has_function_privilege('service_role', 'internal.dispatch_sweep()'
 select is((select count(*) from cron.job where jobname = 'dispatch-sweep'), 1::bigint, 'E4 exactly one cron job named dispatch-sweep');
 select is((select schedule from cron.job where jobname = 'dispatch-sweep'), '*/5 * * * *', 'E4 dispatch-sweep runs every 5 minutes');
 select ok((select command like '%internal.dispatch_sweep()%' from cron.job where jobname = 'dispatch-sweep'), 'E4 dispatch-sweep calls internal.dispatch_sweep()');
-select is((select active from cron.job where jobname = 'dispatch-sweep'), false, 'E5 dispatch-sweep is created DISABLED (enable after the Story 6.1 probe confirms replay returns the same batch_id)');
+-- 0009 created the job DISABLED; the Story 6.1 probe confirmed that a replayed Idempotency-Key returns the same batch_id
+-- (docs/provider-api.md row a), so 0013_cron_poll.sql enables it (Story 6.3) — the schema as a whole has it ACTIVE.
+select is((select active from cron.job where jobname = 'dispatch-sweep'), true, 'E5 dispatch-sweep is ENABLED (0009 created it disabled; 0013 enabled it after the probe)');
 
 -- ============================================================================
 -- fixtures — brand A, one campaign per send (uq_sends_one_active_per_campaign):

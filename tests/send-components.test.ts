@@ -116,6 +116,47 @@ describe("SendStatus", () => {
     expect(html).not.toContain("send-source");
   });
 
+  it("Story 6.3: a reporting portal send renders the live-figures block from its view row (counts, captioned rates), 'No reports yet' without one, nothing for a confirmed send", () => {
+    const rules = {
+      delivered_rate: { key: "delivered_rate", label: "Delivered rate", rule_text: "delivered ÷ sent", alternative_text: "x" },
+      bounce_rate: { key: "bounce_rate", label: "Bounce rate", rule_text: "bounced ÷ sent", alternative_text: "x" },
+      open_rate: { key: "open_rate", label: "Open rate", rule_text: "**total** opens ÷ sent", alternative_text: "x" },
+      click_rate: { key: "click_rate", label: "Click rate", rule_text: "clicks ÷ sent", alternative_text: "x" },
+      unsubscribe_rate: { key: "unsubscribe_rate", label: "Unsubscribe rate", rule_text: "unsubscribes ÷ delivered", alternative_text: "x" },
+    };
+    const row = {
+      brand_id: "b", campaign_id: "c", external_id: "KIL-0016", name: null, channel: "email", target_country: "KE", sent_at: null, spend: null,
+      source: "portal", send_id: base.id, dispatched_at: "2026-09-15T09:51:03Z",
+      sent: 5, delivered: 5, bounced: 2, opens: 3, clicks: 0, unsubscribes: 1,
+      delivered_rate: 100, bounce_rate: 40, open_rate: 60, click_rate: 0, unsubscribe_rate: 20,
+    };
+    const reporting = { ...base, status: "reporting" as const, batch_id: "B-ING", accepted_count: 5, rejected_count: 0, dispatched_at: "2026-09-15T09:51:03Z" };
+    const live = renderToStaticMarkup(createElement(SendStatus, { send: reporting, live: { row, rules } }));
+    expect(live).toContain('data-testid="send-live"');
+    expect(live).toContain('data-testid="send-live-delivered">5<');
+    expect(live).toContain('data-testid="send-live-bounced">2<');
+    expect(live).toContain('data-testid="send-live-opens">3<');
+    expect(live).toContain('data-testid="send-live-clicks">0<');
+    expect(live).toContain('data-testid="send-live-unsubscribes">1<');
+    expect(live).toContain("100.00%");
+    expect(live).toContain("40.00%");
+    expect(live).toContain("60.00%");
+    expect(live).toContain("20.00%");
+    expect(live).toContain("opens ÷ sent"); // the metric_rules caption, in the markup
+    expect(live).not.toContain("send-live-empty");
+
+    const zeros = { ...row, delivered: 0, bounced: 0, opens: 0, clicks: 0, unsubscribes: 0, delivered_rate: 0, bounce_rate: 0, open_rate: 0, click_rate: 0, unsubscribe_rate: 0 };
+    const empty = renderToStaticMarkup(createElement(SendStatus, { send: reporting, live: { row: zeros, rules } }));
+    expect(empty).toContain('data-testid="send-live-empty"');
+    expect(empty).toContain("No reports yet");
+    expect(empty).not.toContain("0.00%");
+    const noRow = renderToStaticMarkup(createElement(SendStatus, { send: { ...reporting, status: "complete" }, live: null }));
+    expect(noRow).toContain("No reports yet");
+    const confirmed = renderToStaticMarkup(createElement(SendStatus, { send: { ...base, status: "confirmed" }, live: { row, rules } }));
+    expect(confirmed).not.toContain("send-live");
+    expect(confirmed).not.toContain("No reports yet");
+  });
+
   it("partial reads 'Partially sent — {accepted} of {count} accepted'", () => {
     const html = renderToStaticMarkup(createElement(SendStatus, { send: { ...base, status: "partial", accepted_count: 49000, rejected_count: 1064, batch_id: "mock-18" } }));
     expect(html).toContain('data-status="partial"');

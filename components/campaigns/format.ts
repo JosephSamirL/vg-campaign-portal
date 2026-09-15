@@ -1,4 +1,4 @@
-import { formatDateTime } from "@/lib/format";
+import { relativeTime } from "@/lib/format";
 
 /*
  * Campaign-specific display formatting; rates and dates use `lib/format.ts` (`formatPercent`,
@@ -28,21 +28,11 @@ export function formatSpend(value: number | string | null | undefined): string {
   return n == null ? DASH : n.toFixed(2);
 }
 
-const relative = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
-
 /**
- * "3 minutes ago" / "yesterday" for a sync timestamp; falls back to the absolute UTC form
- * for anything unparseable or further than a month away. `now` is injectable for tests.
+ * "3 minutes ago" / "yesterday" for a sync timestamp — Story 6.3 moved the implementation to
+ * `lib/format.ts` (`relativeTime`) so the campaign pages and the send history share one clock; this
+ * name stays for its callers. `now` is injectable for tests.
  */
 export function formatRelative(value: string | Date, now: number = Date.now()): string {
-  const d = value instanceof Date ? value : new Date(value);
-  const t = d.getTime();
-  if (Number.isNaN(t)) return DASH;
-  const seconds = Math.round((t - now) / 1000);
-  const abs = Math.abs(seconds);
-  if (abs < 45) return "just now";
-  if (abs < 3600) return relative.format(Math.round(seconds / 60), "minute");
-  if (abs < 86_400) return relative.format(Math.round(seconds / 3600), "hour");
-  if (abs < 30 * 86_400) return relative.format(Math.round(seconds / 86_400), "day");
-  return formatDateTime(d);
+  return relativeTime(value, now);
 }

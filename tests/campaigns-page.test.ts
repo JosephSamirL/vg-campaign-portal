@@ -13,26 +13,37 @@ type Result = { data: unknown; error: unknown };
 
 const responses: Record<string, Result | Result[]> = {};
 const calls: Record<string, Array<[string, unknown[]]>> = {};
+const chains: Record<string, number> = {};
 
+/**
+ * One builder per `from(table)` call. The first chain on a table records under `table` and answers from
+ * `responses[table]`; a second chain on the same table in one render (Story 6.3: the list page reads
+ * `v_campaign_performance` twice — reported rows, then portal rows) records under `table#2` and answers from
+ * `responses["table#2"]`, falling back to `responses[table]`.
+ */
 function builder(table: string) {
-  calls[table] ??= [];
+  const n = (chains[table] = (chains[table] ?? 0) + 1);
+  const key = n === 1 ? table : `${table}#${n}`;
+  calls[key] ??= [];
   const chain: Record<string, unknown> = {};
   const record = (method: string) =>
     (...args: unknown[]) => {
-      calls[table].push([method, args]);
+      calls[key].push([method, args]);
       return chain;
     };
   for (const m of ["select", "eq", "order", "in", "maybeSingle"]) chain[m] = record(m);
   chain.then = (resolve: (r: Result) => unknown, reject?: (e: unknown) => unknown) => {
-    const r = responses[table];
+    const r = responses[key] ?? responses[table];
     const result = Array.isArray(r) ? r.shift() : r;
-    return Promise.resolve(result ?? { data: null, error: { message: `no mock for ${table}` } }).then(resolve, reject);
+    return Promise.resolve(result ?? { data: null, error: { message: `no mock for ${key}` } }).then(resolve, reject);
   };
   return chain;
 }
 
 const from = vi.fn((table: string) => builder(table));
-vi.mock("@/lib/supabase/server", () => ({ createClient: async () => ({ from }) }));
+// Story 6.3: `.rpc('last_poll_status')` is recorded under the key `rpc:last_poll_status`
+const rpc = vi.fn((name: string) => builder(`rpc:${name}`));
+vi.mock("@/lib/supabase/server", () => ({ createClient: async () => ({ from, rpc }) }));
 
 // `RetryAlert` is a client component calling `useRouter()`; outside an app router that throws.
 // `notFound()` stays real so the 404 digest is what the page really throws.
@@ -164,22 +175,35 @@ const sendRow = {
   created_at: "2026-09-15T09:51:00+00:00",
 };
 
+/** Chain numbering is per render: a test may render twice with fresh responses. */
+function resetChains() {
+  for (const k of Object.keys(chains)) delete chains[k];
+}
+
 async function renderList() {
+  resetChains();
   return renderToStaticMarkup(await CampaignsPage());
 }
 
 async function renderDetail(id: string) {
+  resetChains();
   return renderToStaticMarkup(await CampaignPage({ params: Promise.resolve({ id }) }));
 }
 
 beforeEach(() => {
   for (const k of Object.keys(responses)) delete responses[k];
   for (const k of Object.keys(calls)) delete calls[k];
+  resetChains();
   from.mockClear();
+  rpc.mockClear();
   role = "analyst";
   responses.metric_rules = { data: rules, error: null };
   responses.sends = { data: [], error: null };
   responses.v_share_links = { data: [], error: null };
+  // Story 6.3 defaults: no portal send yet (v_last_sync has no row), no poll run yet
+  responses.v_last_sync = { data: null, error: null };
+  responses["rpc:last_poll_status"] = { data: [], error: null };
+  responses["v_campaign_performance#2"] = { data: [], error: null }; // the list page's portal-rows query
 });
 
 /** A share link as `v_share_links` returns it (Story 5.2); tests override status / dates per case. */
@@ -294,6 +318,126 @@ describe("/campaigns", () => {
     const html = await renderList();
     expect(html).toContain('data-testid="retry-alert"');
     expect(html).not.toContain("without campaign_id");
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // Story 6.3 AC5 — "Reports last synced", the muted warning, the sync alert, portal-send rows
+  // ---------------------------------------------------------------------------------------------
+  it("reads v_last_sync (.maybeSingle) and last_poll_status() and renders 'Reports last synced {relative}' with the UTC instant as title", async () => {
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    const lastOk = new Date(Date.now() - 3 * 60_000).toISOString();
+    responses.v_last_sync = { data: { brand_id: "b", last_ok_at: lastOk }, error: null };
+    responses["rpc:last_poll_status"] = { data: [{ status: "ok", finished_at: lastOk }], error: null };
+    const html = await renderList();
+    expect(calls.v_last_sync).toEqual([["select", ["*"]], ["maybeSingle", []]]);
+    expect(rpc).toHaveBeenCalledWith("last_poll_status");
+    expect(html).toContain("Reports last synced <time");
+    expect(html).toContain("3 minutes ago");
+    expect(html).not.toContain("no portal sends yet");
+    expect(html).not.toContain("last-synced-warning");
+    expect(html).not.toContain("sync-status-alert");
+  });
+
+  it("keeps the placeholder while the view has no row, and stays quiet for requested / running runs", async () => {
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    for (const status of ["requested", "running"]) {
+      responses["rpc:last_poll_status"] = { data: [{ status, finished_at: null }], error: null };
+      const html = await renderList();
+      expect(html).toContain("Reports last synced: no portal sends yet");
+      expect(html).not.toContain("last-synced-warning");
+    }
+  });
+
+  it("shows the muted warning (not the destructive alert) when the newest poll run is failed / auth_error / … — with the last success, or 'the portal went live'", async () => {
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses.v_last_sync = { data: { brand_id: "b", last_ok_at: "2026-09-15T11:57:00Z" }, error: null };
+    responses["rpc:last_poll_status"] = { data: [{ status: "provider_error", finished_at: "2026-09-15T12:05:00Z" }], error: null };
+    const html = await renderList();
+    expect(html).toContain('<p class="text-muted-foreground" data-testid="last-synced-warning">Report sync has not succeeded since 15 Sep 2026, 11:57 UTC</p>');
+    expect(html).not.toContain("sync-status-alert");
+    expect(html).not.toContain('role="alert"');
+    expect(html).toContain("119.16%"); // the figures still render
+
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses.v_last_sync = { data: null, error: null };
+    responses["rpc:last_poll_status"] = { data: [{ status: "failed", finished_at: "2026-09-15T12:05:00Z" }], error: null };
+    const never = await renderList();
+    expect(never).toContain("Report sync has not succeeded since the portal went live");
+    expect(never).toContain("Reports last synced: no portal sends yet");
+  });
+
+  it("renders the inline 'Sync status unavailable' alert — never a fake 'synced' — when v_last_sync or last_poll_status() fails; the table still renders", async () => {
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses.v_last_sync = { data: null, error: { message: "v_last_sync timed out" } };
+    const html = await renderList();
+    expect(html).toContain('data-testid="sync-status-alert"');
+    expect(html).toContain("Sync status unavailable");
+    expect(html).toContain(`data-digest="${errorDigest("v_last_sync timed out")}"`);
+    expect(html).not.toContain("v_last_sync timed out");
+    expect(html).not.toContain("Reports last synced");
+    expect(html).not.toContain("last-synced-warning");
+    expect(html).toContain("campaigns-table");
+
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses.v_last_sync = { data: { brand_id: "b", last_ok_at: "2026-09-15T11:57:00Z" }, error: null };
+    responses["rpc:last_poll_status"] = { data: null, error: { message: "permission denied for function last_poll_status" } };
+    const rpcFailed = await renderList();
+    expect(rpcFailed).toContain("Sync status unavailable");
+    expect(rpcFailed).not.toContain("Reports last synced");
+    expect(rpcFailed).not.toContain("permission denied");
+  });
+
+  it("lists portal-send rows beneath their campaign with live counts and captioned rates; a send with no report yet reads 'No reports yet', never zeros", async () => {
+    responses.v_campaign_performance = { data: [kil16, kil33], error: null };
+    const portalBase = { ...kil16, source: "portal", spend: null, sent_at: null, unsubscribes: 1, unsubscribe_rate: 0.02 };
+    responses["v_campaign_performance#2"] = {
+      data: [
+        { ...portalBase, send_id: "9d0e1f2a-3b4c-4d5e-8f60-1a2b3c4d5e6f", dispatched_at: "2026-09-15T10:00:03Z", sent: 5000, delivered: 4900, bounced: 100, opens: 6100, clicks: 350, delivered_rate: 98.0, bounce_rate: 2.0, open_rate: 122.0, click_rate: 7.0 },
+        { ...portalBase, send_id: "aaaa1111-3b4c-4d5e-8f60-1a2b3c4d5e6f", dispatched_at: "2026-09-15T12:00:03Z", sent: 5000, delivered: 0, bounced: 0, opens: 0, clicks: 0, unsubscribes: 0, delivered_rate: 0, bounce_rate: 0, open_rate: 0, click_rate: 0, unsubscribe_rate: 0 },
+      ],
+      error: null,
+    };
+    const html = await renderList();
+    // the portal query: same view, source = portal, newest dispatch first
+    expect(calls["v_campaign_performance#2"]).toEqual([
+      ["select", ["*"]],
+      ["eq", ["source", "portal"]],
+      ["order", ["dispatched_at", { ascending: false, nullsFirst: false }]],
+    ]);
+    expect(html.match(/data-testid="portal-send-row"/g)?.length).toBe(2);
+    // beneath KIL-0016 (their campaign), before KIL-0033
+    const reported16 = html.indexOf(`href="/campaigns/${KIL_0016}"`);
+    const portal1 = html.indexOf('data-send-id="9d0e1f2a-3b4c-4d5e-8f60-1a2b3c4d5e6f"');
+    const reported33 = html.indexOf("KIL-0033");
+    expect(reported16).toBeLessThan(portal1);
+    expect(portal1).toBeLessThan(reported33);
+    // live counts + the view's rates, captioned from metric_rules (the tooltip content is in the markup)
+    expect(html).toContain("Portal send");
+    expect(html).toContain("9d0e1f2a");
+    expect(html).toContain("4,900");
+    expect(html).toContain("6,100");
+    expect(html).toContain("122.00%");
+    expect(html).toContain("0.02%");
+    expect(html).toContain("15 Sep 2026"); // dispatched_at as the send date
+    // the send with no report: an empty state, not 0.00 %
+    expect(html).toMatch(/data-send-id="aaaa1111-3b4c-4d5e-8f60-1a2b3c4d5e6f" data-live="false"/);
+    expect(html).toContain('data-testid="portal-send-empty"');
+    expect(html).toContain("No reports yet");
+    expect(html).not.toContain("0.00%");
+    // "as reported by the source" stays with the campaign rows; the portal rows are labelled as live figures
+    expect(html).toContain("Campaign rows: as reported by the source.");
+    expect(html).toContain("Portal send rows: live figures from the provider");
+  });
+
+  it("renders the portal-sends alert (the campaign table intact) when the portal query fails", async () => {
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses["v_campaign_performance#2"] = { data: null, error: { message: "portal rows timed out" } };
+    const html = await renderList();
+    expect(html).toContain(`data-digest="${errorDigest("portal rows timed out")}"`);
+    expect(html).not.toContain("portal rows timed out");
+    expect(html).toContain("campaigns-table");
+    expect(html).toContain("119.16%");
+    expect(html).not.toContain("portal-send-row");
   });
 });
 
@@ -553,5 +697,70 @@ describe("/campaigns/[id]", () => {
     expect(html).not.toContain("view timed out");
     expect(html).toContain("No sends yet");
     expect(html).not.toContain("119.16%");
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // Story 6.3 AC5 — LastSynced in the header, live figures per reporting send
+  // ---------------------------------------------------------------------------------------------
+  it("shows 'Reports last synced' in the header with the muted warning when the poller is failing, and the sync alert when the read fails", async () => {
+    responses.campaigns = { data: campaignRow, error: null };
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses.v_last_sync = { data: { brand_id: "b", last_ok_at: "2026-09-15T11:57:00Z" }, error: null };
+    responses["rpc:last_poll_status"] = { data: [{ status: "deferred", finished_at: "2026-09-15T12:05:00Z" }], error: null };
+    const html = await renderDetail(KIL_0016);
+    expect(html.indexOf('data-testid="campaign-header"')).toBeLessThan(html.indexOf('data-testid="last-synced"'));
+    expect(html.indexOf('data-testid="last-synced"')).toBeLessThan(html.indexOf("Reported by the source"));
+    expect(html).toContain('<time dateTime="2026-09-15T11:57:00Z" title="15 Sep 2026, 11:57 UTC">');
+    expect(html).toContain("Report sync has not succeeded since 15 Sep 2026, 11:57 UTC");
+    expect(html).not.toContain("sync-status-alert");
+
+    responses.campaigns = { data: campaignRow, error: null };
+    responses.v_campaign_performance = { data: [kil16], error: null };
+    responses["rpc:last_poll_status"] = { data: null, error: { message: "rpc down" } };
+    const failed = await renderDetail(KIL_0016);
+    expect(failed).toContain("Sync status unavailable");
+    expect(failed).not.toContain("Reports last synced");
+    expect(failed).toContain("119.16%");
+  });
+
+  it("gives each reporting | complete | partial portal send its live figures from the view row with send_id = send.id; no events → 'No reports yet', never zeros; confirmed / seed rows carry no block", async () => {
+    responses.campaigns = { data: campaignRow, error: null };
+    const liveRow = { ...kil16, source: "portal", send_id: "live", dispatched_at: "2026-09-15T10:00:03Z", sent: 50064, delivered: 49000, bounced: 1064, opens: 61000, clicks: 3500, unsubscribes: 12, delivered_rate: 97.87, bounce_rate: 2.13, open_rate: 121.84, click_rate: 6.99, unsubscribe_rate: 0.02 };
+    const quietRow = { ...kil16, source: "portal", send_id: "quiet", dispatched_at: "2026-09-15T12:00:03Z", sent: 50064, delivered: 0, bounced: 0, opens: 0, clicks: 0, unsubscribes: 0, delivered_rate: 0, bounce_rate: 0, open_rate: 0, click_rate: 0, unsubscribe_rate: 0 };
+    responses.v_campaign_performance = { data: [kil16, liveRow, quietRow], error: null };
+    responses.sends = {
+      data: [
+        { ...sendRow, id: "quiet", status: "reporting", batch_id: "mock-2", accepted_count: 50064, rejected_count: 0, dispatched_at: "2026-09-15T12:00:03Z" },
+        { ...sendRow, id: "live", status: "partial", batch_id: "mock-1", accepted_count: 50064, rejected_count: 0, dispatched_at: "2026-09-15T10:00:03Z" },
+        { ...sendRow, id: "pending", status: "confirmed" },
+        { ...sendRow, id: "seed", status: "complete", source: "seed_send_log", batch_key: "BATCH-0007", confirmed_by: null, dispatched_at: "2026-03-17T07:15:00+00:00" },
+      ],
+      error: null,
+    };
+    const html = await renderDetail(KIL_0016);
+    // the live block sits inside the `live` send's article
+    const liveBlock = html.slice(html.indexOf('data-send-id="live"'), html.indexOf('data-send-id="pending"'));
+    expect(liveBlock).toContain('data-testid="send-live"');
+    expect(liveBlock).toContain('data-testid="send-live-delivered">49,000<');
+    expect(liveBlock).toContain('data-testid="send-live-bounced">1,064<');
+    expect(liveBlock).toContain('data-testid="send-live-opens">61,000<');
+    expect(liveBlock).toContain('data-testid="send-live-unsubscribes">12<');
+    expect(liveBlock).toContain("97.87%");
+    expect(liveBlock).toContain("121.84%");
+    expect(liveBlock).toContain("0.02%");
+    expect(liveBlock).toContain("opens ÷ sent — can exceed 100%"); // captioned from metric_rules
+    // the reporting send with no events: the empty state, no zeros
+    const quietBlock = html.slice(html.indexOf('data-send-id="quiet"'), html.indexOf('data-send-id="live"'));
+    expect(quietBlock).toContain('data-testid="send-live-empty"');
+    expect(quietBlock).toContain("No reports yet");
+    expect(quietBlock).not.toContain("send-live-delivered");
+    expect(quietBlock).not.toContain("0.00%");
+    // confirmed and seed rows: no block at all
+    const pendingBlock = html.slice(html.indexOf('data-send-id="pending"'), html.indexOf('data-send-id="seed"'));
+    expect(pendingBlock).not.toContain("send-live");
+    const seedBlock = html.slice(html.indexOf('data-send-id="seed"'));
+    expect(seedBlock).not.toContain("send-live");
+    // the figures section still shows the portal block per send (6.2) and the reported block first
+    expect(html.indexOf("Reported by the source")).toBeLessThan(html.indexOf("Portal send live"));
   });
 });

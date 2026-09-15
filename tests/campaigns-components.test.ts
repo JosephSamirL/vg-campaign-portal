@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { LastSynced } from "../components/campaigns/last-synced";
+import { syncWarning } from "../lib/queries/campaigns";
 import { formatCount, formatRelative, formatSpend } from "../components/campaigns/format";
 import { CampaignSection, type CampaignSectionProps } from "../components/campaigns/campaign-section";
 
@@ -46,6 +47,24 @@ describe("LastSynced", () => {
     expect(html).toContain('<time dateTime="2026-09-15T11:57:00Z" title="15 Sep 2026, 11:57 UTC">');
     expect(html).toContain("Provider unreachable since 11:57 UTC");
     expect(html).not.toContain("no portal sends yet");
+  });
+
+  it("the warning is the muted line (text-muted-foreground), never the destructive alert, and absent when null (Story 6.3 AC5)", () => {
+    const warned = renderToStaticMarkup(createElement(LastSynced, { last_ok_at: null, warning: "Report sync has not succeeded since the portal went live" }));
+    expect(warned).toContain('<p class="text-muted-foreground" data-testid="last-synced-warning">');
+    expect(warned).not.toContain('role="alert"');
+    expect(warned).toContain("Reports last synced: no portal sends yet"); // the placeholder stays while the view has no row
+    const quiet = renderToStaticMarkup(createElement(LastSynced, { last_ok_at: "2026-09-15T11:57:00Z", warning: null }));
+    expect(quiet).not.toContain("last-synced-warning");
+  });
+});
+
+describe("syncWarning (Story 6.3 AC5)", () => {
+  it("is null for ok / requested / running and for no run at all; a failure names the last success, or 'the portal went live'", () => {
+    for (const status of ["ok", "requested", "running", null]) expect(syncWarning(status, "2026-09-15T11:57:00Z")).toBeNull();
+    expect(syncWarning("failed", "2026-09-15T11:57:00Z")).toBe("Report sync has not succeeded since 15 Sep 2026, 11:57 UTC");
+    expect(syncWarning("auth_error", null)).toBe("Report sync has not succeeded since the portal went live");
+    for (const status of ["provider_error", "rate_limited", "deferred"]) expect(syncWarning(status, null)).toContain("has not succeeded");
   });
 });
 

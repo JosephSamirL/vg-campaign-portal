@@ -1,6 +1,9 @@
+import { formatCount } from "@/components/campaigns/format";
+import { PerformanceCell } from "@/components/campaigns/performance-cell";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
 import type { Tables } from "@/lib/database.types";
-import { formatDateTime, formatInt } from "@/lib/format";
+import { formatDateTime, formatInt, relativeTime } from "@/lib/format";
+import { hasLiveFigures, type CampaignPerformanceRow, type RateRules } from "@/lib/queries/campaigns";
 
 export type SendRow = Tables<"sends">;
 export type SendStatus = SendRow["status"];
@@ -32,13 +35,95 @@ export function SendStatusBadge({ status }: { status: SendStatus }) {
   );
 }
 
+/** Story 6.3: the send's `source = 'portal'` row of `v_campaign_performance` + the five rate rules to caption it. */
+export type LiveFigures = { row: CampaignPerformanceRow; rules: RateRules };
+
+/** Sends the provider reports on: dispatched and answered (`reporting`), finished (`complete`), or partly accepted (`partial`). */
+export const REPORTING_STATUSES: ReadonlySet<SendStatus> = new Set<SendStatus>(["reporting", "complete", "partial"]);
+
 export type SendStatusProps = {
   send: SendRow;
   /** 4.5 passes "from send log" for `source === 'seed_send_log'`; portal sends carry no label. */
   sourceLabel?: string | null;
   /** The owner-only Retry for a send stuck in `confirmed` (AC5); rendered where the history decides. */
   retry?: React.ReactNode;
+  /** Story 6.3: the live figures for a `reporting | complete | partial` send (null / absent → "No reports yet"). */
+  live?: LiveFigures | null;
 };
+
+const LIVE_COUNTS = [
+  ["delivered", "Delivered"],
+  ["bounced", "Bounced"],
+  ["opens", "Opens"],
+  ["clicks", "Clicks"],
+  ["unsubscribes", "Unsubscribes"],
+] as const;
+
+/**
+ * The live-figures block (Story 6.3 AC5): what the provider has reported for this send so far, as the poller
+ * ingested it — counts per type and the five rates as `v_campaign_performance` computed them, each captioned from
+ * `metric_rules` (D-5: printed, never recomputed). A send with no report yet reads "No reports yet" — an empty
+ * state, not a row of zeros. `dispatched_at` on the row is the moment the clock started; `reporting` sends keep
+ * changing until `complete_sends()` closes them 24 h later.
+ */
+export function SendLiveFigures({ live }: { live: LiveFigures | null | undefined }) {
+  if (!live || !hasLiveFigures(live.row)) {
+    return (
+      <p className="text-sm text-muted-foreground" data-testid="send-live-empty" role="status">
+        No reports yet
+      </p>
+    );
+  }
+  const { row, rules } = live;
+  return (
+    <div className="flex flex-col gap-2 rounded-md bg-muted/40 p-3" data-testid="send-live">
+      <p className="text-xs text-muted-foreground">
+        Delivery reports so far
+        {row.dispatched_at && (
+          <>
+            {" "}
+            · dispatched{" "}
+            <time dateTime={row.dispatched_at} title={formatDateTime(row.dispatched_at)}>
+              {relativeTime(row.dispatched_at)}
+            </time>
+          </>
+        )}
+      </p>
+      <dl className="grid grid-cols-3 gap-3 text-sm sm:grid-cols-5">
+        {LIVE_COUNTS.map(([key, label]) => (
+          <div key={key} className="flex flex-col">
+            <dt className="text-xs text-muted-foreground">{label}</dt>
+            <dd className="tabular-nums" data-testid={`send-live-${key}`}>
+              {formatCount(row[key])}
+            </dd>
+          </div>
+        ))}
+      </dl>
+      <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-5">
+        <div className="flex flex-col items-start">
+          <dt className="text-xs text-muted-foreground">{rules.delivered_rate.label}</dt>
+          <dd><PerformanceCell rate={row.delivered_rate} count={row.delivered} rule={rules.delivered_rate} /></dd>
+        </div>
+        <div className="flex flex-col items-start">
+          <dt className="text-xs text-muted-foreground">{rules.bounce_rate.label}</dt>
+          <dd><PerformanceCell rate={row.bounce_rate} count={row.bounced} rule={rules.bounce_rate} /></dd>
+        </div>
+        <div className="flex flex-col items-start">
+          <dt className="text-xs text-muted-foreground">{rules.open_rate.label}</dt>
+          <dd><PerformanceCell rate={row.open_rate} count={row.opens} rule={rules.open_rate} /></dd>
+        </div>
+        <div className="flex flex-col items-start">
+          <dt className="text-xs text-muted-foreground">{rules.click_rate.label}</dt>
+          <dd><PerformanceCell rate={row.click_rate} count={row.clicks} rule={rules.click_rate} /></dd>
+        </div>
+        <div className="flex flex-col items-start">
+          <dt className="text-xs text-muted-foreground">{rules.unsubscribe_rate.label}</dt>
+          <dd><PerformanceCell rate={row.unsubscribe_rate} count={row.unsubscribes} rule={rules.unsubscribe_rate} /></dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
 
 /**
  * `failure_reason` is stored as `<code>: <detail>` (`provider_422: …`, `body_hash_mismatch`). Only the code is
@@ -55,10 +140,11 @@ export function failureReasonPrefix(reason: string): string {
  * the recipient count, `batch_id`, accepted / rejected. `partial` reads "Partially sent — {accepted}
  * of {count} accepted" when the provider answered, and "Partially sent — provider outcome unknown" when
  * `accepted_count` is null (a capped / expired dispatch: nothing is fabricated for an unknown, FR-19);
- * `failed` shows the `failure_reason` code. Pure display of the `sends` row (RLS) — the app never
- * updates a send; status changes arrive through polling (SendHistory).
+ * `failed` shows the `failure_reason` code. Story 6.3: a portal send in `reporting | complete | partial`
+ * carries the live-figures block (`live`, from `v_campaign_performance`) or "No reports yet". Pure display of
+ * the `sends` row (RLS) — the app never updates a send; status changes arrive through polling (SendHistory).
  */
-export function SendStatus({ send, sourceLabel, retry }: SendStatusProps) {
+export function SendStatus({ send, sourceLabel, retry, live }: SendStatusProps) {
   return (
     <article className="flex flex-col gap-3 rounded-lg border p-4" data-testid="send-status" data-send-id={send.id} data-status={send.status}>
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -99,6 +185,8 @@ export function SendStatus({ send, sourceLabel, retry }: SendStatusProps) {
           {send.failure_reason ? failureReasonPrefix(send.failure_reason) : "Failed — no reason was recorded"}
         </p>
       )}
+
+      {send.source === "portal" && REPORTING_STATUSES.has(send.status) && <SendLiveFigures live={live} />}
 
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
         <dt className="text-muted-foreground">Confirmed</dt>

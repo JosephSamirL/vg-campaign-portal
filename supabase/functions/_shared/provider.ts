@@ -6,6 +6,11 @@
  * POST /v1/messages { campaign?, brand?, recipients[] } with `Authorization: Bearer <key>` and
  * `Idempotency-Key: <key>` → { batch_id, accepted[], rejected[] }. The idempotency key is DERIVED by the caller
  * (`send-<send_id>`, FR-18) so a retry after a crash replays the same request and the provider delivers once.
+ *
+ * GET /v1/messages/{batch_id}/events?since=<next_cursor>&page_size=1000 → { events[], next_cursor, has_more }
+ * (Story 6.3, probe rows b, c, c2, e): `since` carries ONLY a provider `next_cursor` — never an event id, which the
+ * real provider ignores (a full replay). `page_size` is decorative (not honoured) and still sent as 1000. A 429 / 503
+ * carries `Retry-After` (header, else body `retry_after`, else 5 s) — the caller decides whether to wait.
  */
 export type Recipient = { external_id: string; address: string };
 
@@ -114,4 +119,97 @@ export function recipientId(item: ProviderRecipientEcho): string | null {
   if (!item || typeof item !== "object") return null;
   const id = item.external_id ?? item.id ?? item.contact_id ?? item.recipient_id ?? item.email;
   return typeof id === "string" ? id : null;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Story 6.3 — GET /v1/messages/{batch_id}/events
+// ---------------------------------------------------------------------------------------------------------------
+
+/** One page of the report stream as the provider serves it (probe row d: the envelope; the events are opaque here). */
+export type EventsPage = { events: unknown[]; next_cursor: string | null; has_more: boolean };
+
+export type GetEventsResult = {
+  /** HTTP status; 0 = no response (timeout / network). */
+  status: number;
+  /** Seconds to wait before retrying, from a 429 / 503 (`Retry-After` header → body `retry_after` → 5). */
+  retryAfter?: number;
+  /** The parsed page for a 2xx whose body is a well-formed envelope. */
+  body?: EventsPage;
+  /** The raw response text (≤ 500 chars) for anything that is not a well-formed 2xx; the error text for status 0. */
+  text?: string;
+  /** Why a 2xx has no `body`, or the timeout / network error. */
+  error?: string;
+};
+
+export const EVENTS_TIMEOUT_MS = 20_000;
+export const DEFAULT_RETRY_AFTER_S = 5;
+/** Decorative on the real provider (probe c2), but the mock honours it and the contract documents it. */
+export const EVENTS_PAGE_SIZE = 1000;
+
+/** `Retry-After` in seconds: the header (delay-seconds or an HTTP date) → the body's `retry_after` → 5. */
+export function retryAfterSeconds(headers: Headers, bodyText: string): number {
+  const header = headers.get("retry-after");
+  if (header) {
+    const n = Number(header.trim());
+    if (Number.isFinite(n) && n >= 0) return n;
+    const at = Date.parse(header);
+    if (Number.isFinite(at)) return Math.max(0, Math.ceil((at - Date.now()) / 1000));
+  }
+  try {
+    const parsed = JSON.parse(bodyText) as { retry_after?: unknown };
+    if (parsed && typeof parsed === "object") {
+      const n = typeof parsed.retry_after === "number" ? parsed.retry_after : Number(parsed.retry_after);
+      if (Number.isFinite(n) && n >= 0) return n;
+    }
+  } catch {
+    // not JSON
+  }
+  return DEFAULT_RETRY_AFTER_S;
+}
+
+/** A 2xx body is a page only when it is an object with an `events` array; `next_cursor` non-string → null, `has_more` non-boolean → false. */
+export function parseEventsPage(text: string): { page?: EventsPage; error?: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { error: text ? "body_not_json" : "body_empty" };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { error: "body_not_object" };
+  const obj = parsed as { events?: unknown; next_cursor?: unknown; has_more?: unknown };
+  if (!Array.isArray(obj.events)) return { error: "events_not_array" };
+  const cursor = typeof obj.next_cursor === "string" && obj.next_cursor.length > 0 ? obj.next_cursor : null;
+  return { page: { events: obj.events, next_cursor: cursor, has_more: obj.has_more === true } };
+}
+
+/**
+ * One GET, one outcome, no retry here: the poller owns the run budget and decides whether a `retryAfter` fits in it.
+ * `since` is sent only when given (the stored `next_cursor`); `signal` bounds the wall time (default 20 s).
+ */
+export async function getEvents(batchId: string, since?: string | null, signal: AbortSignal = AbortSignal.timeout(EVENTS_TIMEOUT_MS)): Promise<GetEventsResult> {
+  const url = new URL(`${providerBaseUrl()}/v1/messages/${encodeURIComponent(batchId)}/events`);
+  if (since) url.searchParams.set("since", since);
+  url.searchParams.set("page_size", String(EVENTS_PAGE_SIZE));
+  let response: Response;
+  try {
+    response = await fetch(url, { headers: { Authorization: `Bearer ${env("PROVIDER_API_KEY")}`, Accept: "application/json" }, signal });
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "Error";
+    const message = error instanceof Error ? error.message : String(error);
+    return { status: 0, error: name === "TimeoutError" || name === "AbortError" ? `timeout: ${message}` : `${name}: ${message}` };
+  }
+  let text = "";
+  try {
+    text = await response.text();
+  } catch (error) {
+    text = "";
+    if (response.ok) return { status: response.status, error: `body_unreadable: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  if (response.status === 429 || response.status === 503) {
+    return { status: response.status, retryAfter: retryAfterSeconds(response.headers, text), text: text.slice(0, 500) };
+  }
+  if (!response.ok) return { status: response.status, text: text.slice(0, 500) };
+  const { page, error } = parseEventsPage(text);
+  if (!page) return { status: response.status, error, text: text.slice(0, 500) };
+  return { status: response.status, body: page };
 }

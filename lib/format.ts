@@ -67,3 +67,23 @@ export function formatUtcDate(value: string | Date | null | undefined): string {
   const p = Object.fromEntries(dayMonth.formatToParts(date).map((part) => [part.type, part.value]));
   return `${p.day} ${p.month}`;
 }
+
+const relative = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+
+/**
+ * "3 minutes ago" / "yesterday" for a sync timestamp (Story 6.3: "Reports last synced …"), through
+ * `Intl.RelativeTimeFormat`; the absolute UTC form for anything further than a month away, an em dash for
+ * null / unparseable input. Under 45 s either side — including a slightly-future instant from clock skew
+ * between the database and the render — reads "just now". `now` is injectable for tests.
+ */
+export function relativeTime(value: string | Date | null | undefined, now: number = Date.now()): string {
+  const date = toDate(value);
+  if (!date) return "—";
+  const seconds = Math.round((date.getTime() - now) / 1000);
+  const abs = Math.abs(seconds);
+  if (abs < 45) return "just now";
+  if (abs < 3600) return relative.format(Math.round(seconds / 60), "minute");
+  if (abs < 86_400) return relative.format(Math.round(seconds / 3600), "hour");
+  if (abs < 30 * 86_400) return relative.format(Math.round(seconds / 86_400), "day");
+  return formatDateTime(date);
+}

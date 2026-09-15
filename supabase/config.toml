@@ -409,6 +409,13 @@ deno_version = 2
 [functions.dispatch-send]
 verify_jwt = false
 
+# Story 6.3 — poll-events is called ONLY by the pg_cron jobs (0013_cron_poll.sql) through pg_net with `x-cron-secret`
+# (= secret CRON_SECRET); the function checks it itself, so verify_jwt is off for the same reason as above. It reaches
+# `internal.*` over the platform-injected SUPABASE_DB_URL (a direct Postgres connection; never set by hand). Locally:
+# `supabase functions serve --env-file supabase/mock.env` serves both functions against the provider mock.
+[functions.poll-events]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327

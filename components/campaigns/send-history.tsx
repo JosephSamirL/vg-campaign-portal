@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { EmptyState } from "@/components/layout/empty-state";
 import { DispatchRetryButton } from "@/components/send/dispatch-retry-button";
-import { SendStatus, isTerminal, type SendRow } from "@/components/send/send-status";
+import { SendStatus, isTerminal, type LiveFigures, type SendRow } from "@/components/send/send-status";
 import { Button } from "@/components/ui/button";
 
 /** A send still `confirmed` this long after `confirmed_at` has not been leased: show "Dispatch didn't start" + Retry (AC5). */
@@ -30,6 +30,8 @@ export type SendHistoryProps = {
   isOwner: boolean;
   /** Per-`source` badge text; the page passes `{ seed_send_log: "from send log" }` (Story 4.5). Unlisted sources carry no badge. */
   sourceLabels?: Partial<Record<SendRow["source"], string>>;
+  /** Story 6.3: live figures by `send_id` (the `portal` rows of `v_campaign_performance` + the rate rules), read by the page. */
+  live?: Record<string, LiveFigures>;
 };
 
 /**
@@ -43,9 +45,10 @@ export type SendHistoryProps = {
  * on each tick — never during the server render, so hydration matches) gets the owner-only Retry;
  * a row the server flagged `lease_expired` (stranded in `dispatched`) gets the same Retry under
  * "Waiting for the provider — lease expired" — `dispatchSendAction` honours the lease / attempt cap
- * and replays the same Idempotency-Key, so it can never double-send.
+ * and replays the same Idempotency-Key, so it can never double-send. Story 6.3: `live` hands each
+ * reporting send its figures from the view (read by the page on every refresh, so they move with the poller).
  */
-export function SendHistory({ sends, isOwner, sourceLabels }: SendHistoryProps) {
+export function SendHistory({ sends, isOwner, sourceLabels, live }: SendHistoryProps) {
   const router = useRouter();
   const active = sends.some((s) => !isTerminal(s.status));
   const [now, setNow] = useState<number | null>(null);
@@ -97,7 +100,7 @@ export function SendHistory({ sends, isOwner, sourceLabels }: SendHistoryProps) 
           const retry = stranded ? <DispatchRetryButton sendId={send.id} label={LEASE_EXPIRED_LABEL} /> : stuck ? <DispatchRetryButton sendId={send.id} /> : null;
           return (
             <li key={send.id}>
-              <SendStatus send={send} sourceLabel={sourceLabels?.[send.source] ?? null} retry={retry} />
+              <SendStatus send={send} sourceLabel={sourceLabels?.[send.source] ?? null} retry={retry} live={live?.[send.id] ?? null} />
             </li>
           );
         })}

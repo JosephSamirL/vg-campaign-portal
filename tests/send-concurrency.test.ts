@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import dotenv from "dotenv";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { anonClient, credentialsFor, serviceClient, signInAs, testStack, type SignedIn, type TestClient } from "./setup";
+import { acquireTestLock, anonClient, credentialsFor, serviceClient, signInAs, testStack, type SignedIn, type TestClient } from "./setup";
 
 /**
  * Story 4.2 — confirm exactly once, through the same PostgREST path the portal uses (AC5).
@@ -172,9 +172,10 @@ if (!configured) {
  * `provider_batches` row, and the mock saw exactly one distinct Idempotency-Key, `send-<id>`. A third call is
  * skipped; the KAROO owner gets 404 `not_in_brand` (RLS hides the send); the KILELE analyst 403 `not_owner`;
  * no auth 401; a bad cron secret 401. Then, on fresh sends: a provider 4xx → `failed` with the sanitised reason, and a
- * provider 5xx → with `DISPATCH_RETRY_ENABLED` unset (supabase/mock.env — the sweep is off until Story 6.3 enables it,
- * D-7) the unknown outcome is `partial` immediately with `failure_reason` `provider_503_outcome_unknown`, `accepted_count`
- * null, no re-POST, a further call skipped as `status_partial`. Crash recovery (4.3 review): a 200 whose body was lost leaves the send
+ * provider 5xx → with `DISPATCH_RETRY_ENABLED=on` (supabase/mock.env since Story 6.3 enabled the sweep, probe row a)
+ * the unknown outcome stays `dispatched` under the lease (a further call `lease_unavailable`, no re-POST); with the flag
+ * unset it is `partial` immediately with `failure_reason` `provider_503_outcome_unknown`, `accepted_count` null, a
+ * further call skipped as `status_partial` (D-7). Crash recovery (4.3 review): a 200 whose body was lost leaves the send
  * `dispatched` (never `failed`); once the lease is expired (service role) a re-invoke replays the SAME
  * `Idempotency-Key`, the mock answers the stored batch_id (`replay: true`) and the send reaches `reporting` with
  * attempts 2 and one distinct key. Skipped loudly when the function is not served (fails under CI).
@@ -189,6 +190,13 @@ function localCronSecret(): string | null {
   if (process.env.TEST_CRON_SECRET) return process.env.TEST_CRON_SECRET;
   if (!existsSync("supabase/mock.env")) return null;
   return dotenv.parse(readFileSync("supabase/mock.env", "utf8")).CRON_SECRET ?? null;
+}
+
+/** Story 6.3 (probe row a): `DISPATCH_RETRY_ENABLED=on` in supabase/mock.env — the 5xx case below asserts whichever branch is served. */
+function localRetryEnabled(): boolean {
+  if (process.env.TEST_DISPATCH_RETRY_ENABLED) return process.env.TEST_DISPATCH_RETRY_ENABLED === "on";
+  if (!existsSync("supabase/mock.env")) return false;
+  return dotenv.parse(readFileSync("supabase/mock.env", "utf8")).DISPATCH_RETRY_ENABLED === "on";
 }
 
 /** Is `dispatch-send` being served? A malformed body must come back as the function's own 400 invalid_input. */
@@ -291,8 +299,11 @@ describe.skipIf(!dispatchConfigured)("dispatch-send: exactly once through the Ed
   const createdSends: string[] = [];
   const service = dispatchConfigured ? serviceClient() : undefined;
   const cronSecret = localCronSecret();
+  let releaseLock: (() => void) | undefined;
 
   beforeAll(async () => {
+    // the poller suite (tests/ingestion.test.ts) must not see this suite's batches inside its poll window (Story 6.3)
+    releaseLock = await acquireTestLock("provider-batches");
     await mockReset();
     owner = await signInAs("KILELE", "owner");
     const { data: sessionData } = await owner.supabase.auth.getSession();
@@ -301,15 +312,19 @@ describe.skipIf(!dispatchConfigured)("dispatch-send: exactly once through the Ed
     ownerHeaders = { Authorization: `Bearer ${token}`, apikey: stack!.key };
     ({ sendId, recipientCount } = await confirmFreshSend(owner));
     createdSends.push(sendId);
-  });
+  }, 200_000);
 
   afterAll(async () => {
-    await mockConfig({ status: null, reject_ids: [], latency_ms: 0, blank_body: false }).catch(() => undefined);
-    if (!service) return;
-    for (const id of createdSends) {
-      // teardown through the service role: cascade removes send_recipients + provider_batches
-      const { error } = await service.from("sends").delete().eq("id", id);
-      if (error) throw new Error(`teardown: could not delete send ${id}: ${error.message}`);
+    try {
+      await mockConfig({ status: null, reject_ids: [], latency_ms: 0, blank_body: false }).catch(() => undefined);
+      if (!service) return;
+      for (const id of createdSends) {
+        // teardown through the service role: cascade removes send_recipients + provider_batches
+        const { error } = await service.from("sends").delete().eq("id", id);
+        if (error) throw new Error(`teardown: could not delete send ${id}: ${error.message}`);
+      }
+    } finally {
+      releaseLock?.();
     }
   });
 
@@ -432,7 +447,7 @@ describe.skipIf(!dispatchConfigured)("dispatch-send: exactly once through the Ed
     }
   });
 
-  it("a provider 5xx with retries off (DISPATCH_RETRY_ENABLED unset) marks the send partial — outcome unknown, nothing fabricated, no re-POST", async () => {
+  it("a provider 5xx: with retries ON (Story 6.3, DISPATCH_RETRY_ENABLED=on in mock.env) the send stays dispatched under its lease for the sweep to replay; with retries OFF it is partial at once — outcome unknown, nothing fabricated, no re-POST either way", async () => {
     const fresh = await confirmFreshSend(owner);
     createdSends.push(fresh.sendId);
     const before = (await mockCalls()).length;
@@ -440,13 +455,30 @@ describe.skipIf(!dispatchConfigured)("dispatch-send: exactly once through the Ed
     try {
       const res = await invokeDispatch(fresh.sendId, ownerHeaders);
       expect(res.status).toBe(202);
-      // wait for the background POST to have happened (the mock records it), then for the CAS to partial (6.2, D-7)
+      // wait for the background POST to have happened (the mock records it), then for the outcome to land
       const started = Date.now();
       while ((await mockCalls()).length === before && Date.now() - started < POLL_LIMIT_MS) await new Promise((r) => setTimeout(r, POLL_MS));
       const calls = await mockCalls();
       expect(calls.length).toBe(before + 1);
       expect(calls[calls.length - 1]).toMatchObject({ key: `send-${fresh.sendId}`, status: 503 });
+      await new Promise((r) => setTimeout(r, POLL_MS));
       let send = await readSend(owner.supabase, fresh.sendId);
+      if (localRetryEnabled()) {
+        // retries on: the outcome is unknown and stays unknown under the lease — the sweep (now enabled, 0013) replays
+        // the same Idempotency-Key once the 10-min lease expires and caps at 3 attempts (D-7, probe row a)
+        expect(send.status).toBe("dispatched");
+        expect(send.failure_reason).toBeNull();
+        expect(send.batch_id).toBeNull();
+        expect(send.accepted_count).toBeNull();
+        expect(send.dispatch_attempts).toBe(1);
+        expect(send.dispatch_lease_until).toBeTruthy();
+        expect(Date.parse(send.dispatch_lease_until!)).toBeGreaterThan(Date.now());
+        const again = await invokeDispatch(fresh.sendId, ownerHeaders);
+        expect(again.status).toBe(200);
+        expect(again.body).toMatchObject({ skipped: true, reason: "lease_unavailable" });
+        expect((await mockCalls()).length).toBe(before + 1);
+        return;
+      }
       while (send.status === "dispatched" && Date.now() - started < POLL_LIMIT_MS) {
         await new Promise((r) => setTimeout(r, POLL_MS));
         send = await readSend(owner.supabase, fresh.sendId);

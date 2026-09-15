@@ -48,3 +48,4 @@ credentials.txt
 credentials.*.txt
 .env*
 !.env.example
+.vitest-locks/

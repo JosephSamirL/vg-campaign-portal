@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import dotenv from "dotenv";
 import { createBrowserClient } from "@supabase/ssr";
@@ -155,4 +155,36 @@ export function serviceClient(): TestClient {
   return createClient<Database>(stack.url, localServiceRoleKey(), {
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
   });
+}
+
+/**
+ * Story 6.3 — a cross-file mutex for the suites that dispatch real batches against the shared local stack. Vitest
+ * runs files in parallel; `tests/send-concurrency.test.ts` (dispatch) and `tests/ingestion.test.ts` (the poller)
+ * both create `provider_batches` rows inside the poll window, and the poller polls EVERY batch in the window — so
+ * the two must not overlap. An atomic `mkdir` under `.vitest-locks/` is the lock (the OS guarantees exactly one
+ * winner); a lock older than `staleMs` belongs to a crashed run and is taken over. Returns the release function.
+ */
+export async function acquireTestLock(name: string, { timeoutMs = 180_000, staleMs = 5 * 60_000 }: { timeoutMs?: number; staleMs?: number } = {}): Promise<() => void> {
+  const dir = path.resolve(process.cwd(), ".vitest-locks");
+  const lock = path.join(dir, name);
+  mkdirSync(dir, { recursive: true });
+  const started = Date.now();
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      return () => rmSync(lock, { recursive: true, force: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > staleMs) {
+          rmSync(lock, { recursive: true, force: true }); // a crashed run's leftover
+          continue;
+        }
+      } catch {
+        continue; // released between the stat and now
+      }
+      if (Date.now() - started > timeoutMs) throw new Error(`tests/setup.ts: could not acquire test lock "${name}" within ${timeoutMs} ms (${lock})`);
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
 }
