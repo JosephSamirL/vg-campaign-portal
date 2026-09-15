@@ -35,7 +35,7 @@ pnpm dev                     # http://localhost:3000
 
 `schema.sql` at the repo root is the reproducible database definition: it is the concatenation of every migration, in order.
 
-`tests/isolation.test.ts` signs in as the KILELE analyst through PostgREST and asserts it sees only KILELE rows in every exposed table. It reads the git-ignored `.env.test`: `TEST_KILELE_ANALYST_EMAIL` / `TEST_KILELE_ANALYST_PASSWORD` (a **local-stack** password — `credentials.txt` holds whichever target `pnpm seed` ran last, so set a local one with the Admin API if needed) and, when `.env.local` points at the hosted project, `TEST_SUPABASE_URL` / `TEST_SUPABASE_PUBLISHABLE_KEY` for the local stack. Without `.env.test` the suite skips with a warning.
+`tests/isolation.test.ts` signs in as the KILELE analyst through PostgREST and asserts it sees only KILELE rows in every exposed table. It reads the git-ignored `.env.test`: `TEST_KILELE_ANALYST_EMAIL` / `TEST_KILELE_ANALYST_PASSWORD` (a **local-stack** password — from `credentials.127.0.0.1-54321.txt`, or set one with the Admin API) and `TEST_SUPABASE_URL` / `TEST_SUPABASE_PUBLISHABLE_KEY` for the local stack (`http://127.0.0.1:54321`; placeholders in `.env.example`). It never falls back to `.env.local`. Without `.env.test` the suite skips with a loud console message and a `todo`; under `CI` it fails instead; a non-local `TEST_SUPABASE_URL` is refused unless `ALLOW_HOSTED_TESTS=1`.
 
 ## Sign-in
 

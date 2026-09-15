@@ -40,7 +40,11 @@ export async function updateSession(request: NextRequest) {
   }
 
   if (request.nextUrl.pathname === "/") {
-    return NextResponse.redirect(new URL("/dashboard", request.url));
+    // Carry any cookies getClaims() staged (a rotated refresh token) onto the redirect,
+    // or the browser keeps the old token and the next request logs the user out.
+    const redirect = NextResponse.redirect(new URL("/dashboard", request.url));
+    for (const cookie of supabaseResponse.cookies.getAll()) redirect.cookies.set(cookie);
+    return redirect;
   }
 
   // Return supabaseResponse as-is: a fresh NextResponse without its cookies would stop

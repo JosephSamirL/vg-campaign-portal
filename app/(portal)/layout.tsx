@@ -10,6 +10,8 @@ export const instant = false;
  * Every (portal) route assumes a session AND a brand. proxy.ts already bounced anonymous
  * requests, so a null here means "valid session, no allow-list row (or brand)": sign it
  * out through the route handler (a layout cannot clear cookies) with a reason (D-9).
+ * `getCurrentAppUser()` throws (never null) on an Auth/PostgREST failure, so that case
+ * reaches `app/error.tsx` and the session is kept.
  */
 export default async function PortalLayout({ children }: { children: React.ReactNode }) {
   const me = await getCurrentAppUser();

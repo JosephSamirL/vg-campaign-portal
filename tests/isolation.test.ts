@@ -8,9 +8,13 @@ import type { Database } from "../lib/database.types";
  * user's own app_users row) from every exposed table.
  *
  * Later table-creating stories append their tables here (and their fixtures to the
- * pgTAP suite). Runs against the local stack; needs `.env.test` (git-ignored) with
- * TEST_KILELE_ANALYST_EMAIL / TEST_KILELE_ANALYST_PASSWORD and, when `.env.local`
- * points at the hosted project, TEST_SUPABASE_URL / TEST_SUPABASE_PUBLISHABLE_KEY.
+ * pgTAP suite). Runs against the LOCAL stack only; needs `.env.test` (git-ignored) with
+ * TEST_KILELE_ANALYST_EMAIL / TEST_KILELE_ANALYST_PASSWORD and TEST_SUPABASE_URL /
+ * TEST_SUPABASE_PUBLISHABLE_KEY (see `.env.example`). Never falls back to `.env.local`,
+ * so a hosted URL there can never be signed into by accident (1.5 review, Medium #3).
+ *
+ * Unconfigured: skipped with a loud console message locally; a hard failure under CI.
+ * Non-local TEST_SUPABASE_URL: refused unless ALLOW_HOSTED_TESTS=1 is set explicitly.
  */
 export const TABLES = ["brands", "app_users", "contacts", "campaigns", "events"] as const satisfies readonly (
   keyof Database["public"]["Tables"]
@@ -28,11 +32,47 @@ const SEEDED_TABLES: readonly (typeof TABLES)[number][] = ["brands", "app_users"
 const OWN_BRAND = "KILELE";
 const OTHER_BRANDS = ["KAROO", "MARRAKECH"];
 
-const url = process.env.TEST_SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
-const key = process.env.TEST_SUPABASE_PUBLISHABLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+const REQUIRED = [
+  "TEST_SUPABASE_URL",
+  "TEST_SUPABASE_PUBLISHABLE_KEY",
+  "TEST_KILELE_ANALYST_EMAIL",
+  "TEST_KILELE_ANALYST_PASSWORD",
+] as const;
+const LOCAL_URL = "http://127.0.0.1:54321";
+
+const url = process.env.TEST_SUPABASE_URL;
+const key = process.env.TEST_SUPABASE_PUBLISHABLE_KEY;
 const email = process.env.TEST_KILELE_ANALYST_EMAIL;
 const password = process.env.TEST_KILELE_ANALYST_PASSWORD;
-const configured = Boolean(url && key && email && password);
+const missing = REQUIRED.filter((name) => !process.env[name]);
+const configured = missing.length === 0;
+
+/** Only the local stack is a legal target unless the operator opts in explicitly. */
+export function isLocalSupabaseUrl(value: string | undefined): boolean {
+  if (!value) return false;
+  try {
+    const u = new URL(value);
+    return u.hostname === "127.0.0.1" && u.port === "54321";
+  } catch {
+    return false;
+  }
+}
+
+if (configured && !isLocalSupabaseUrl(url) && process.env.ALLOW_HOSTED_TESTS !== "1") {
+  throw new Error(
+    `tests/isolation.test.ts: TEST_SUPABASE_URL must be the local stack (${LOCAL_URL}); ` +
+      `refusing to sign into ${url}. Set ALLOW_HOSTED_TESTS=1 to override deliberately.`,
+  );
+}
+
+if (!configured) {
+  const message =
+    `tests/isolation.test.ts: not configured — missing ${missing.join(", ")} ` +
+    `(put them in the git-ignored .env.test; see .env.example).`;
+  if (process.env.CI) throw new Error(`${message} CI requires the isolation test to run.`);
+  // process.stderr, not console.warn: Vitest swallows console output from a file whose tests all skip.
+  process.stderr.write(`\n${"=".repeat(88)}\nSKIPPED: ${message}\n${"=".repeat(88)}\n\n`);
+}
 
 /** The app's browser client, with an in-memory cookie jar since there is no `document` here. */
 function client() {
@@ -47,10 +87,12 @@ function client() {
 }
 
 describe.skipIf(!configured)("brand isolation through PostgREST (KILELE analyst)", () => {
-  const supabase = client();
+  // Created inside beforeAll: a skipped describe still runs its body at collection time.
+  let supabase: ReturnType<typeof client>;
   let ownBrandId: string;
 
   beforeAll(async () => {
+    supabase = client();
     const { error } = await supabase.auth.signInWithPassword({ email: email!, password: password! });
     if (error) throw new Error(`sign-in failed for the KILELE analyst: ${error.message}`);
     const { data: me } = await supabase
@@ -96,7 +138,5 @@ describe.skipIf(!configured)("brand isolation through PostgREST (KILELE analyst)
 });
 
 if (!configured) {
-  it("isolation test is configured (.env.test present)", () => {
-    console.warn("tests/isolation.test.ts skipped: .env.test with TEST_KILELE_ANALYST_* is missing");
-  });
+  it.todo(`isolation test is configured (.env.test with ${missing.join(", ")}) — SKIPPED, not passed`);
 }

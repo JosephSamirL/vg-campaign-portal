@@ -7,14 +7,40 @@ import { config } from "../proxy";
 const matcher = new RegExp("^" + config.matcher[0] + "$");
 
 describe("proxy.ts matcher", () => {
-  it.each(["/share/abc", "/api/health", "/login", "/auth/callback", "/_next/static/x.js"])(
-    "does not match %s (never redirected to /login)",
-    (path) => {
-      expect(matcher.test(path)).toBe(false);
-    },
-  );
+  it.each([
+    "/share",
+    "/share/abc",
+    "/api/health",
+    "/login",
+    "/auth",
+    "/auth/callback",
+    "/auth/signout",
+    "/_next/static/x.js",
+    "/_next/image",
+    "/favicon.ico",
+    "/opengraph-image.png",
+    "/twitter-image.png",
+    "/robots.txt",
+    "/images/logo.svg",
+  ])("does not match %s (never redirected to /login)", (path) => {
+    expect(matcher.test(path)).toBe(false);
+  });
 
-  it.each(["/", "/dashboard", "/campaigns/1"])("matches %s (session refreshed + guarded)", (path) => {
+  it.each([
+    "/",
+    "/dashboard",
+    "/campaigns/1",
+    "/contacts",
+    // anchored exclusions: a prefix that merely starts like an excluded path is still guarded
+    "/authors",
+    "/shareholders",
+    "/share-x",
+    "/login-x",
+    "/login/extra",
+    "/api/healthz",
+    "/api/health/deep",
+    "/_nextjs",
+  ])("matches %s (session refreshed + guarded)", (path) => {
     expect(matcher.test(path)).toBe(true);
   });
 });
