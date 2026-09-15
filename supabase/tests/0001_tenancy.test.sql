@@ -21,23 +21,30 @@ create temp table t_exposed_schemas(nspname text);
 insert into t_exposed_schemas values ('public');
 
 create temp table t_allow_anon_exec(fn text);          -- 5.1: get_shared_results; 7.2: health_ping
+insert into t_allow_anon_exec values ('get_shared_results');  -- Story 5.1: the stranger's only door (secdef, volatile, returns a status row)
 
 create temp table t_allow_auth_exec(fn text);
 insert into t_allow_auth_exec values ('current_brand_id'), ('current_app_role');
 insert into t_allow_auth_exec values ('is_contactable');   -- Story 3.1: security invoker, inlinable predicate (D-4)
 insert into t_allow_auth_exec values ('recipient_preview');   -- Story 4.1: secdef, brand-checked, raises not_in_brand / invalid_input
 insert into t_allow_auth_exec values ('confirm_send');        -- Story 4.2: secdef, owner-only + brand-checked; the only write path into sends
+insert into t_allow_auth_exec values ('create_share_link'), ('revoke_share_link'), ('get_shared_results');  -- Story 5.1 (0011_share.sql): owner RPCs + the public door
 
 create temp table t_allow_secdef(fn text);
 insert into t_allow_secdef values ('current_brand_id'), ('current_app_role');
 insert into t_allow_secdef values ('recipient_preview');      -- Story 4.1 (internal.recipient_classification has no grant and lives in internal: in neither list)
 insert into t_allow_secdef values ('confirm_send');           -- Story 4.2 (0007_confirm_send.sql)
+insert into t_allow_secdef values ('create_share_link'), ('revoke_share_link'), ('get_shared_results');  -- Story 5.1 (0011_share.sql)
 
 create temp table t_view_exceptions(relname text);     -- views without brand_id; each needs its own assertion
 
 -- Column-level grants a role may hold (S4c/S4d). Empty until Story 5.1 adds the share_links
 -- SELECT columns for anon, e.g. insert into t_column_grant_exceptions values ('anon', 'share_links', 'SELECT').
 create temp table t_column_grant_exceptions(rolname text, relname text, privilege text);
+-- Story 5.1 (S2): share_links has NO table-level SELECT for authenticated — only a column-level grant on the seven
+-- non-hash columns so the security_invoker v_share_links can read them; token_hash / password_hash / `select *`
+-- stay refused. anon holds nothing on it (get_shared_results is security definer).
+insert into t_column_grant_exceptions values ('authenticated', 'share_links', 'SELECT');
 
 -- readable after the role switch to authenticated (pgTAP grants its own temp tables the same way)
 grant select on t_exposed_schemas, t_allow_anon_exec, t_allow_auth_exec, t_allow_secdef, t_view_exceptions, t_column_grant_exceptions to public;
@@ -108,6 +115,14 @@ begin
   insert into public.provider_batches (send_id, brand_id, batch_id)
   values ('00000000-0000-4000-8000-0000000000a4', ba, 'FIX-BATCH-A'),
          ('00000000-0000-4000-8000-0000000000b4', bb, 'FIX-BATCH-B');
+  -- Story 5.1: share_links — one active link per brand on that brand's own campaign (fixed ids for the per-RPC
+  -- block). brand_counts() covers share_links through the granted brand_id column (count(*), never select *)
+  -- and v_share_links through its brand_id. internal.share_attempts has no brand_id and lives outside public.
+  insert into public.share_links (id, brand_id, campaign_id, token_hash, password_hash, created_by)
+  values ('00000000-0000-4000-8000-0000000000a5', ba, current_setting('tenancy.campaign_a')::uuid,
+          sha256(convert_to('fixture-token-a', 'UTF8')), extensions.crypt('fixture-pass-a', extensions.gen_salt('bf')), ua),
+         ('00000000-0000-4000-8000-0000000000b5', bb, current_setting('tenancy.campaign_b')::uuid,
+          sha256(convert_to('fixture-token-b', 'UTF8')), extensions.crypt('fixture-pass-b', extensions.gen_salt('bf')), ub);
 end $$;
 
 -- Supabase's documented RLS-test pattern: request.jwt.claims + role authenticated, transaction-local.
@@ -312,6 +327,20 @@ select throws_ok(format($$ select public.confirm_send(%L, null) $$, current_sett
 
 select pg_temp.as_postgres();
 select is((select count(*) from public.sends where campaign_id = current_setting('tenancy.campaign_b')::uuid), 1::bigint, 'B13 confirm_send wrote nothing for brand B''s campaign (only the complete fixture send)');
+
+-- Story 5.1: create_share_link / revoke_share_link — as brand A's OWNER, brand B's real campaign id and brand B's
+-- real link id (both exist — the secdef RPCs bypass RLS, so only their own brand checks stand) → not_in_brand;
+-- brand B's link stays unrevoked. v_share_links is covered by B7/B8 (own 1, other 0); share_links itself through
+-- its granted columns — `select *` is refused (column-level grant only, S2).
+select pg_temp.as_user(current_setting('tenancy.user_a')::uuid);
+select throws_ok(format($$ select public.create_share_link(%L, 'fixture-pass-x') $$, current_setting('tenancy.campaign_b')), 'P0001', 'not_in_brand', 'B14 create_share_link refuses brand B''s campaign (not_in_brand)');
+select throws_ok($$ select public.revoke_share_link('00000000-0000-4000-8000-0000000000b5') $$, 'P0001', 'not_in_brand', 'B15 revoke_share_link refuses brand B''s link (not_in_brand)');
+select throws_ok($$ select * from public.share_links $$, '42501', null, 'B16 select * from share_links is refused for authenticated (column-level grant only)');
+select throws_ok($$ select token_hash from public.share_links $$, '42501', null, 'B16 token_hash is unreadable for authenticated');
+select is((select string_agg(status, ',') from public.v_share_links), 'active', 'B16 v_share_links shows own link only, active');
+select pg_temp.as_postgres();
+select is((select count(*) from public.share_links where brand_id = current_setting('tenancy.brand_b')::uuid and revoked_at is null), 1::bigint, 'B15 brand B''s link is still active (nothing revoked across brands)');
+select is((select count(*) from public.share_links where brand_id = current_setting('tenancy.brand_b')::uuid), 1::bigint, 'B14 no link was created on brand B''s campaign');
 select is(current_user::text, 'postgres', 'B9 role restored to postgres before finish');
 
 -- ============================================================================
@@ -348,6 +377,20 @@ cross join (values ('INSERT'), ('UPDATE')) pr(privilege) -- column privileges: D
 where c.relkind in ('r', 'p', 'v', 'm')
   and n.nspname in (select nspname from t_exposed_schemas)
 order by n.nspname, c.relname, pr.privilege;
+
+-- S4e (Story 5.1): a column-level SELECT grant to authenticated WITHOUT a table-level one is exactly the
+-- t_column_grant_exceptions list (S4c covers anon; S4d covers authenticated writes; whole-table SELECTs are
+-- the normal tenant grant). A stray `grant select (email) on contacts` would surface here.
+select ok(
+  not (has_any_column_privilege('authenticated', c.oid, 'SELECT') and not has_table_privilege('authenticated', c.oid, 'SELECT'))
+  or exists (select 1 from t_column_grant_exceptions e
+             where e.rolname = 'authenticated' and e.relname = c.relname and upper(e.privilege) = 'SELECT'),
+  format('S4e authenticated column-only SELECT is an exception: %I.%I', n.nspname, c.relname))
+from pg_class c
+join pg_namespace n on n.oid = c.relnamespace
+where c.relkind in ('r', 'p', 'v', 'm')
+  and n.nspname in (select nspname from t_exposed_schemas)
+order by n.nspname, c.relname;
 
 -- S7b: every security definer function pins search_path (S7 only checks WHICH functions are
 -- secdef; dropping `set search_path = ''` is an isolation-weakening edit it would not notice).

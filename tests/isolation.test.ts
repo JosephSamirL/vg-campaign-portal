@@ -36,7 +36,14 @@ export const VIEWS = [
   "v_signups_30d",
   "v_campaign_performance",
   "v_contacts",
+  "v_share_links", // Story 5.1: the ONLY read path for share links (no hash columns, + status)
 ] as const satisfies readonly (keyof Database["public"]["Views"])[];
+/**
+ * Story 5.1: `share_links` is deliberately NOT in TABLES — `authenticated` holds a column-level SELECT on its
+ * non-hash columns only (no table-level grant, S2), so `select *` is refused by Postgres (42501) even for the
+ * owner's own brand; brand users read `v_share_links`. Its isolation contract is asserted separately below.
+ */
+const SHARE_LINKS_COLUMNS = "id, brand_id, campaign_id, expires_at, revoked_at, created_by, created_at";
 const RELATIONS = [...TABLES, ...VIEWS] as const;
 type Relation = (typeof RELATIONS)[number];
 
@@ -171,6 +178,23 @@ describe.skipIf(!configured)("brand isolation through PostgREST (KILELE analyst)
       if ("brand_id" in r) expect(r.brand_id).toBe(ownBrandId);
       if ("code" in r) expect(OTHER_BRANDS).not.toContain(r.code);
     }
+  });
+
+  it("share_links: `select *` is refused for a signed-in user (column-level grant only), the granted columns are brand-scoped", async () => {
+    const star = await supabase.from("share_links").select("*");
+    expect(star.error?.code).toBe("42501");
+    expect(star.data).toBeNull();
+    const hash = await supabase.from("share_links").select("token_hash");
+    expect(hash.error?.code).toBe("42501");
+    const { data, error } = await supabase.from("share_links").select(SHARE_LINKS_COLUMNS);
+    expect(error).toBeNull();
+    for (const row of data ?? []) expect(row.brand_id).toBe(ownBrandId);
+  });
+
+  it("share_links: anonymous requests are refused on the granted columns too", async () => {
+    const { data, error } = await client().from("share_links").select(SHARE_LINKS_COLUMNS);
+    expect(error?.code).toBe("42501");
+    expect(data).toBeNull();
   });
 
   it.each(RELATIONS)("%s: anonymous requests are refused, not merely filtered", async (table) => {

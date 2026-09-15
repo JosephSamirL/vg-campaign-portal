@@ -701,6 +701,71 @@ export type Database = {
           },
         ]
       }
+      share_links: {
+        Row: {
+          brand_id: string
+          campaign_id: string
+          created_at: string
+          created_by: string
+          expires_at: string | null
+          id: string
+          password_hash: string
+          revoked_at: string | null
+          token_hash: string
+        }
+        Insert: {
+          brand_id: string
+          campaign_id: string
+          created_at?: string
+          created_by: string
+          expires_at?: string | null
+          id?: string
+          password_hash: string
+          revoked_at?: string | null
+          token_hash: string
+        }
+        Update: {
+          brand_id?: string
+          campaign_id?: string
+          created_at?: string
+          created_by?: string
+          expires_at?: string | null
+          id?: string
+          password_hash?: string
+          revoked_at?: string | null
+          token_hash?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "share_links_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "brands"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "share_links_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "v_signups_30d"
+            referencedColumns: ["brand_id"]
+          },
+          {
+            foreignKeyName: "share_links_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "share_links_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_campaign_performance"
+            referencedColumns: ["campaign_id"]
+          },
+        ]
+      }
     }
     Views: {
       v_campaign_performance: {
@@ -914,6 +979,68 @@ export type Database = {
           },
         ]
       }
+      v_share_links: {
+        Row: {
+          brand_id: string | null
+          campaign_id: string | null
+          created_at: string | null
+          created_by: string | null
+          expires_at: string | null
+          id: string | null
+          revoked_at: string | null
+          status: string | null
+        }
+        Insert: {
+          brand_id?: string | null
+          campaign_id?: string | null
+          created_at?: string | null
+          created_by?: string | null
+          expires_at?: string | null
+          id?: string | null
+          revoked_at?: string | null
+          status?: never
+        }
+        Update: {
+          brand_id?: string | null
+          campaign_id?: string | null
+          created_at?: string | null
+          created_by?: string | null
+          expires_at?: string | null
+          id?: string | null
+          revoked_at?: string | null
+          status?: never
+        }
+        Relationships: [
+          {
+            foreignKeyName: "share_links_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "brands"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "share_links_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "v_signups_30d"
+            referencedColumns: ["brand_id"]
+          },
+          {
+            foreignKeyName: "share_links_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "share_links_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "v_campaign_performance"
+            referencedColumns: ["campaign_id"]
+          },
+        ]
+      }
       v_signups_30d: {
         Row: {
           brand_id: string | null
@@ -956,6 +1083,14 @@ export type Database = {
           isOneToOne: true
           isSetofReturn: false
         }
+      }
+      create_share_link: {
+        Args: {
+          p_campaign_id: string
+          p_expires_at?: string
+          p_password: string
+        }
+        Returns: string
       }
       current_app_role: {
         Args: never
@@ -1058,6 +1193,26 @@ export type Database = {
           isSetofReturn: true
         }
       }
+      get_shared_results: {
+        Args: { p_password: string; p_token: string }
+        Returns: {
+          bounce_rate: number
+          campaign_name: string
+          captions: Json
+          channel: string
+          click_rate: number
+          delivered_rate: number
+          open_rate: number
+          reported_bounced: number
+          reported_clicks: number
+          reported_delivered: number
+          reported_opens: number
+          reported_sent: number
+          sent_at: string
+          status: string
+          unsubscribe_rate: number
+        }[]
+      }
       is_contactable: {
         Args: { c: Database["public"]["Tables"]["contacts"]["Row"] }
         Returns: boolean
@@ -1078,6 +1233,7 @@ export type Database = {
           total_count: number
         }[]
       }
+      revoke_share_link: { Args: { p_id: string }; Returns: undefined }
     }
     Enums: {
       app_role: "owner" | "analyst"
