@@ -28,7 +28,7 @@ pnpm dev                     # http://localhost:3000
 |---|---|
 | `pnpm test` | Vitest (`tests/**/*.test.ts`) against the local stack — `tests/isolation.test.ts` needs `.env.test` (below) |
 | `pnpm test:db` | pgTAP suites in `supabase/tests/` |
-| `pnpm seed` | Loads the seed data (see *Seed load counts*): `--only=users\|stage\|all` (default `all`), `--sample=N`, `--file=<basename>`; the stage step needs `DATABASE_URL` |
+| `pnpm seed` | Loads the seed data (see *Seed load counts*): `--only=users\|stage\|import\|all` (default `all`), `--sample=N`, `--file=<basename>`, `--entity=contacts` (import step; campaigns / events arrive with Story 2.4); the stage and import steps need `DATABASE_URL` |
 | `pnpm schema:dump` | Regenerates `schema.sql` from `supabase/migrations/*.sql` |
 | `pnpm gen:types` | Regenerates `lib/database.types.ts` from the local database |
 | `supabase db push` | Applies migrations to the hosted project |
@@ -192,7 +192,32 @@ stage_events     marrakech-events.csv                     940          6        
 stage_send_log   kilele-send-log.csv                        9          5          5        0
 ```
 
-Spot checks on `stage_contacts` (`kilele-contacts.csv`): `where had_nul` → `row_no` 5495, 23776, 61367 and no `\0` survives in any cell; `where cols[1] = 'external_id'` → 40007; `ncols` histogram 13: 83,923 / 9: 51 / 7: 19; `cols[13] where row_no = 750` = `VIP customer⏎follow up next quarter`; `=IMPORTXML(1,1)` staged verbatim. `karoo-contacts.csv`: `Ann–Marie Botha` decoded from windows-1252 `0x96`, 13-column rows in canonical order, ragged rows in raw order. `marrakech-campaigns.csv` `spend` `221,09` → `221.09`; the delta file carries `as_of 2026-09-01 / file_rank 20`, everything else `2026-08-01 / 10`. Re-staging `marrakech-contacts.csv` alone left the other files' rows untouched and replaced its 957 rows under a new `run_id`. The import counts (kept / rejected / warned) land here with Story 2.4.
+Spot checks on `stage_contacts` (`kilele-contacts.csv`): `where had_nul` → `row_no` 5495, 23776, 61367 and no `\0` survives in any cell; `where cols[1] = 'external_id'` → 40007; `ncols` histogram 13: 83,923 / 9: 51 / 7: 19; `cols[13] where row_no = 750` = `VIP customer⏎follow up next quarter`; `=IMPORTXML(1,1)` staged verbatim. `karoo-contacts.csv`: `Ann–Marie Botha` decoded from windows-1252 `0x96`, 13-column rows in canonical order, ragged rows in raw order. `marrakech-campaigns.csv` `spend` `221,09` → `221.09`; the delta file carries `as_of 2026-09-01 / file_rank 20`, everything else `2026-08-01 / 10`. Re-staging `marrakech-contacts.csv` alone left the other files' rows untouched and replaced its 957 rows under a new `run_id`.
+
+### Import — contacts (local, 2026-09-15)
+
+`pnpm seed --only=import --entity=contacts` calls `internal.import_contacts(run_id)` once per staged contacts file, in `DIALECTS` order (Kilele base → Kilele delta → Karoo → Marrakech), and prints the `summary` jsonb each call returns (also stored on `import_runs`). Every rule is SQL (`supabase/migrations/0003_import.sql`): reject `wrong_column_count` / `repeated_header` / `blank_external_id` / `bad_signup_at` / `unknown_brand_code`; route rows whose `brand_code` names another brand (`routed_from` = the file's brand, `file_rank − 1` so the home brand's own row of the same `as_of` always wins; one count-only `route` issue per target brand in the *source* file's report, never row detail); warn on blank `brand_code`, unknown consent / status / country, missing or invalid email / phone, stripped NUL bytes, superseded in-file duplicates (last row wins) and delta rows that followed a routed contact; upsert source columns only where `(as_of, file_rank)` is strictly newer — `suppressed_at` / `suppressed_reason` are never in the SET list.
+
+First load (empty `contacts`), as printed:
+
+```
+file                                  staged  rejected  routed  candidates  inserted  updated  unchanged  loaded  duplicates  warnings  warned_rows  ms
+------------------------------------  ------  --------  ------  ----------  --------  -------  ---------  ------  ----------  --------  -----------  ----
+kilele-contacts.csv                    83993        71     312       81144     81144        0          0   81144        2778     27378        25125  5067
+kilele-contacts-delta-2026-09-01.csv    4180         0       0        4180      1680     2500          0    4180           0         0            0   246
+karoo-contacts.csv                     13042        46      88       12494     12494        0          0   12494         502       502          502   770
+marrakech-contacts.csv                   957        15       0         918       918        0          0     918          24        24           24    63
+
+brand      contacts  routed_in
+---------  --------  ---------
+KAROO         12718        312
+KILELE        82600         88
+MARRAKECH       918          0
+```
+
+Kilele base: `rejected 71` = 70 ragged records + the repeated header at line 40007; `routed 312` (`brand_code = KAROO`); `duplicates 2778`; `inserted 81144` (of which 312 landed in KAROO, so KILELE held 80,832 after the base file). Delta: `updated 2500`, `inserted 1680` (the delta blanks `deleted_at` / `suppressed_until` on the base rows that had them — a blank is a supplied value). Karoo: 46 ragged rejected, 88 rows routed to KILELE, 502 duplicates. Marrakech: 15 ragged rejected, 24 duplicates. Totals match the architecture's expected post-load counts (S16): **KILELE 82,600 / KAROO 12,718 / MARRAKECH 918**. Warnings for the Kilele base (`v_import_issue_groups`): `consent_unknown` 9,810, `phone_missing` 8,491, `country_unknown` 3,014, `duplicate_external_id` 2,778, `email_missing` 1,810, `email_invalid` 1,431, `phone_invalid` 41, `nul_bytes_stripped` 3 — 27,378 warnings on 25,125 distinct rows. Stored values: `status` active 84,011 / unsubscribed 7,253 / bounced 3,356 / pending 1,616 (no other spellings, no sentinel); `country` KE 58,135 / ZA 12,718 / UG 4,338 / TZ 4,304 / ET 4,304 / RW 4,301 / SS 4,298 / MA 918 / null 2,920; `consent_marketing` true 65,413 / false 21,331 / null 9,492; every email lower-cased; no `E+` phone survives. Neither `blank_brand_code` nor `followed_routed_contact` occurs in the real files (every blank-code row is also ragged; no routed id collides with a home-brand id) — both are exercised by `supabase/tests/0003_import.test.sql` only.
+
+Idempotency: running the same command again (same `run_id`s — the report is rewritten, contacts untouched) printed `inserted 0, updated 0` and `unchanged = candidates` for all four files (81,144 / 4,180 / 12,494 / 918) with every other count identical, in 4.2 s / 0.19 s / 0.62 s / 0.06 s; re-staging `kilele-contacts.csv` (fresh `run_id`) and importing it after the delta gave the same `inserted 0, updated 0, unchanged 81144`. Per-brand counts unchanged after both. The Kilele base import runs in ~5 s locally (the temp table is `analyze`d once `target_brand_id` is set — without that the follow-up joins against 80k+ contacts degraded to 25–70 s nested loops). Hosted load: Story 2.4.
 
 ## Table / function inventory
 
@@ -206,6 +231,11 @@ _Grows as migrations land. Every `public` table: RLS enabled + forced, one `sele
 | `public.events` | `0002_core_tables.sql` | seed + provider events in one vocabulary (`event_type` enum, `event_source` = `seed`/`provider`); natural key `(brand_id, source, event_id)`; `contact_id`/`campaign_id`/`send_id` nullable; indexes `(brand_id, contact_id, type)`, `(brand_id, campaign_id, type)` |
 | `public.normalize_event_type(text)` | `0002_core_tables.sql` | `bounce/open/click/unsubscribe/complaint` (and canonical spellings) → enum, case-insensitive after `btrim`, anything else (incl. `null`) → `unknown`; executable by no exposed role |
 | `staging.stage_contacts`, `stage_campaigns`, `stage_events`, `stage_send_log` | `0002_core_tables.sql` | raw CSV records (`cols text[]`, `ncols`, `source_file`, `file_brand`, `row_no`, `had_nul`, `as_of`, `file_rank`, `run_id`) in the unexposed `staging` schema — no policy, no grant |
+| `public.import_runs` | `0003_import.sql` | one row per imported staged file (`id` = the staging `run_id`, `brand_id`, `brand_code`, `source_file`, `entity`, `started_at`, `finished_at`, `summary` jsonb `{staged, rejected, routed, candidates, inserted, updated, unchanged, loaded, duplicates, warnings, warned_rows}`); index `(brand_id, started_at desc)` |
+| `public.import_issues`, enum `issue_severity` (`reject` / `warn` / `route`) | `0003_import.sql` | the marketer-facing report: `brand_id` = the **source** file's brand (not null), `run_id` (cascade), `row_no` (null for `route`), `reason` (stable lower_snake code), `detail` = only the offending value `{"value": …}` or `{"to": <CODE>, "count": N}` — never a whole row; index `(run_id, severity, reason, row_no)` |
+| `public.v_import_issue_groups` | `0003_import.sql` | `(run_id, brand_id, severity, reason, n)` — per-run issue groups for `/imports` (Story 2.5); `security_invoker` |
+| `internal.normalize_consent / _status / _country / _brand_code / _signup_at / _email / _phone(text)` | `0003_import.sql` | the PRD FR-7 normalisers, `immutable`, `search_path` pinned, `btrim` + `lower` first; unknown is `null`, never a sentinel; `normalize_signup_at` pins `timezone = 'UTC'` (ISO-8601 incl. date-only, and `dd/mm/yyyy HH:MI`); not exposed |
+| `internal.import_contacts(run_id uuid) → jsonb` | `0003_import.sql` | the contacts importer (FR-8: reject / route / warn / last-duplicate-wins / strictly-newer upsert that never touches `suppressed_at`); run by `pnpm seed --only=import` as `postgres`; not exposed |
 
 `0002_core_tables.sql` also opens with the schema-less `alter default privileges for role postgres revoke execute on functions from public` (Story-Time Amendment S17): a bare `create function public.f_probe()` now yields `has_function_privilege('anon', …) = false` — the per-schema line in `0000_grants.sql` could not subtract Postgres's built-in `PUBLIC` execute default. `supabase/tests/0002_core_tables.test.sql` re-runs that probe on every `pnpm test:db`.
 

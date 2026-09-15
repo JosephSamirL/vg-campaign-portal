@@ -315,9 +315,122 @@ export type Database = {
           },
         ]
       }
+      import_issues: {
+        Row: {
+          brand_id: string
+          detail: Json | null
+          id: number
+          reason: string
+          row_no: number | null
+          run_id: string | null
+          severity: Database["public"]["Enums"]["issue_severity"]
+          source_file: string | null
+        }
+        Insert: {
+          brand_id: string
+          detail?: Json | null
+          id?: never
+          reason: string
+          row_no?: number | null
+          run_id?: string | null
+          severity: Database["public"]["Enums"]["issue_severity"]
+          source_file?: string | null
+        }
+        Update: {
+          brand_id?: string
+          detail?: Json | null
+          id?: never
+          reason?: string
+          row_no?: number | null
+          run_id?: string | null
+          severity?: Database["public"]["Enums"]["issue_severity"]
+          source_file?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "import_issues_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "brands"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "import_issues_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "import_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      import_runs: {
+        Row: {
+          brand_code: string | null
+          brand_id: string
+          entity: string | null
+          finished_at: string | null
+          id: string
+          source_file: string | null
+          started_at: string
+          summary: Json | null
+        }
+        Insert: {
+          brand_code?: string | null
+          brand_id: string
+          entity?: string | null
+          finished_at?: string | null
+          id: string
+          source_file?: string | null
+          started_at?: string
+          summary?: Json | null
+        }
+        Update: {
+          brand_code?: string | null
+          brand_id?: string
+          entity?: string | null
+          finished_at?: string | null
+          id?: string
+          source_file?: string | null
+          started_at?: string
+          summary?: Json | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "import_runs_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "brands"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
-      [_ in never]: never
+      v_import_issue_groups: {
+        Row: {
+          brand_id: string | null
+          n: number | null
+          reason: string | null
+          run_id: string | null
+          severity: Database["public"]["Enums"]["issue_severity"] | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "import_issues_brand_id_fkey"
+            columns: ["brand_id"]
+            isOneToOne: false
+            referencedRelation: "brands"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "import_issues_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "import_runs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Functions: {
       current_app_role: {
@@ -341,6 +454,7 @@ export type Database = {
         | "unsubscribed"
         | "complained"
         | "unknown"
+      issue_severity: "reject" | "warn" | "route"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -482,6 +596,7 @@ export const Constants = {
         "complained",
         "unknown",
       ],
+      issue_severity: ["reject", "warn", "route"],
     },
   },
 } as const

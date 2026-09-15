@@ -16,18 +16,23 @@ import type { Database } from "../lib/database.types";
  * Unconfigured: skipped with a loud console message locally; a hard failure under CI.
  * Non-local TEST_SUPABASE_URL: refused unless ALLOW_HOSTED_TESTS=1 is set explicitly.
  */
-export const TABLES = ["brands", "app_users", "contacts", "campaigns", "events"] as const satisfies readonly (
+export const TABLES = ["brands", "app_users", "contacts", "campaigns", "events", "import_runs", "import_issues"] as const satisfies readonly (
   keyof Database["public"]["Tables"]
 )[];
+/** Exposed views (Story 2.3+): same isolation contract as the tables they read. */
+export const VIEWS = ["v_import_issue_groups"] as const satisfies readonly (keyof Database["public"]["Views"])[];
+const RELATIONS = [...TABLES, ...VIEWS] as const;
+type Relation = (typeof RELATIONS)[number];
 
 /**
  * Tables that are guaranteed to hold a KILELE row on the local stack. `brands`/`app_users`
- * are filled by the migrations + seed; Story 2.1's `contacts`/`campaigns`/`events` are empty
- * until Story 2.4 loads the seed files (move them here once it has). The own-brand > 0 proof
+ * are filled by the migrations + seed; Story 2.1's `contacts`/`campaigns`/`events` and Story 2.3's
+ * `import_runs`/`import_issues`/`v_import_issue_groups` are empty until the seed files are loaded
+ * (Story 2.4 moves them here once `pnpm seed` is the documented local setup). The own-brand > 0 proof
  * for them lives in the pgTAP suite's fixtures meanwhile; the anonymous refusal and the
  * "no foreign brand_id" checks below run for every table regardless.
  */
-const SEEDED_TABLES: readonly (typeof TABLES)[number][] = ["brands", "app_users"];
+const SEEDED_TABLES: readonly Relation[] = ["brands", "app_users"];
 
 const OWN_BRAND = "KILELE";
 const OTHER_BRANDS = ["KAROO", "MARRAKECH"];
@@ -74,6 +79,13 @@ if (!configured) {
   process.stderr.write(`\n${"=".repeat(88)}\nSKIPPED: ${message}\n${"=".repeat(88)}\n\n`);
 }
 
+/** `from()` is overloaded per table / view, so a mixed relation name has to be narrowed first. */
+function selectAll(sb: ReturnType<typeof client>, rel: Relation) {
+  return (VIEWS as readonly string[]).includes(rel)
+    ? sb.from(rel as (typeof VIEWS)[number]).select("*")
+    : sb.from(rel as (typeof TABLES)[number]).select("*");
+}
+
 /** The app's browser client, with an in-memory cookie jar since there is no `document` here. */
 function client() {
   const jar = new Map<string, string>();
@@ -118,8 +130,8 @@ describe.skipIf(!configured)("brand isolation through PostgREST (KILELE analyst)
     expect(data?.map((u) => u.email)).toEqual([email]);
   });
 
-  it.each(TABLES)("%s: every visible row belongs to KILELE, zero KAROO/MARRAKECH rows", async (table) => {
-    const { data, error } = await supabase.from(table).select("*");
+  it.each(RELATIONS)("%s: every visible row belongs to KILELE, zero KAROO/MARRAKECH rows", async (table) => {
+    const { data, error } = await selectAll(supabase, table);
     expect(error).toBeNull();
     if (SEEDED_TABLES.includes(table)) expect(data?.length ?? 0).toBeGreaterThan(0);
     for (const row of data ?? []) {
@@ -129,8 +141,8 @@ describe.skipIf(!configured)("brand isolation through PostgREST (KILELE analyst)
     }
   });
 
-  it.each(TABLES)("%s: anonymous requests are refused, not merely filtered", async (table) => {
-    const { data, error } = await client().from(table).select("*");
+  it.each(RELATIONS)("%s: anonymous requests are refused, not merely filtered", async (table) => {
+    const { data, error } = await selectAll(client(), table);
     expect(error).not.toBeNull();
     expect(error?.code).toBe("42501"); // permission denied — no grant to anon
     expect(data).toBeNull();

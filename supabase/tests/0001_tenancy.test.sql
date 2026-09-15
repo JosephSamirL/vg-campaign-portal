@@ -77,6 +77,14 @@ begin
          (bb, 'seed', 'EV-B1', 'opened',
           (select id from public.contacts where brand_id = bb and external_id = 'CT-B1'),
           (select id from public.campaigns where brand_id = bb and external_id = 'CMP-B1'), now());
+  -- Story 2.3: import_runs / import_issues — one finished run + one warn issue per brand
+  -- (v_import_issue_groups exposes brand_id, so brand_counts() covers it: own = 1 group, other = 0).
+  insert into public.import_runs (id, brand_id, brand_code, source_file, entity, finished_at, summary)
+  values ('00000000-0000-4000-8000-0000000000a1', ba, 'KILELE', 'fixture-a.csv', 'contacts', now(), '{"staged": 1}'),
+         ('00000000-0000-4000-8000-0000000000b1', bb, 'KAROO', 'fixture-b.csv', 'contacts', now(), '{"staged": 1}');
+  insert into public.import_issues (brand_id, run_id, source_file, row_no, severity, reason, detail)
+  values (ba, '00000000-0000-4000-8000-0000000000a1', 'fixture-a.csv', 2, 'warn', 'consent_unknown', '{"value": "maybe"}'),
+         (bb, '00000000-0000-4000-8000-0000000000b1', 'fixture-b.csv', 2, 'warn', 'consent_unknown', '{"value": "maybe"}');
 end $$;
 
 -- Supabase's documented RLS-test pattern: request.jwt.claims + role authenticated, transaction-local.

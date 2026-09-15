@@ -207,5 +207,10 @@ describe("pnpm seed flags", () => {
     expect(() => parseArgs(["--sample=ten"])).toThrow(/--sample/);
     expect(() => parseArgs(["--file=nope.csv"])).toThrow(/--file/);
     expect(() => parseArgs(["--truncate"])).toThrow(/unknown argument/);
+    // Story 2.3: the import step
+    expect(parseArgs(["--only=import"])).toEqual({ only: "import" });
+    expect(parseArgs(["--only=import", "--entity=contacts"])).toEqual({ only: "import", entity: "contacts" });
+    expect(() => parseArgs(["--entity=users"])).toThrow(/--entity/);
+    expect(() => parseArgs(["--only=import", "--entity=campaigns"])).toThrow(/Story 2\.4/);
   });
 });
