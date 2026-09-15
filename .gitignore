@@ -52,3 +52,6 @@ credentials.*.txt
 
 # Story 7.1 — 400 px audit screenshots (local, regenerated per run)
 /screenshots/
+
+# Story 7.3 — the filled submission email (passwords, provider key, share password); template lives in docs/submission-email.md
+submission-email.txt
