@@ -62,6 +62,24 @@ describe("the contracts around /api/health", () => {
     expect(vercel.crons).toEqual([{ path: "/api/health", schedule: "0 6 * * *" }]);
   });
 
+  it("ESLint fences lib/supabase/admin out of the app (any spelling) and leaves scripts/ and tests/ alone", async () => {
+    const { ESLint } = await import("eslint");
+    const eslint = new ESLint({ overrideConfigFile: "eslint.config.mjs" });
+    const probe = 'import "@/lib/supabase/admin";\nimport "../../../lib/supabase/admin";\nimport "../../../lib/supabase/admin.ts";\nexport {};\n';
+    const fenced = await eslint.lintText(probe, { filePath: ROUTE });
+    const restricted = fenced[0].messages.filter((m) => m.ruleId === "no-restricted-imports");
+    expect(restricted.map((m) => m.line)).toEqual([1, 2, 3]);
+    expect(restricted[0].message).toMatch(/publishable key/);
+    // the real route is clean
+    const real = await eslint.lintText(readFileSync(ROUTE, "utf8"), { filePath: ROUTE });
+    expect(real[0].messages.filter((m) => m.ruleId === "no-restricted-imports")).toEqual([]);
+    // the two legitimate homes of the service-role client
+    for (const filePath of ["scripts/seed/users.ts", "tests/setup.ts"]) {
+      const allowed = await eslint.lintText('import "../lib/supabase/admin";\nexport {};\n', { filePath });
+      expect(allowed[0].messages.filter((m) => m.ruleId === "no-restricted-imports")).toEqual([]);
+    }
+  }, 30_000);
+
   it("proxy.ts leaves /api/health outside the session guard", () => {
     const matcher = new RegExp("^" + proxyConfig.matcher[0] + "$");
     expect(matcher.test("/api/health")).toBe(false);
