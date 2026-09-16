@@ -592,47 +592,15 @@ Campaign issues, in full: Kilele `duplicate_external_id` ×2 (`CMP-014` at row 6
 
 Every number equals the architecture's expected table (S16 / Story 2.4 Dev Notes) — no deviation. Least-sure candidates for the submission note: the 633 Marrakech events whose `campaign_external_id` names no Marrakech campaign (loaded, `campaign_id null`, excluded from campaign performance); the two byte-identical Kilele campaign pairs collapsed to one row each; Karoo `CMP-014` whose parent pointer `KIL-0007` lives in Kilele (pointer dropped); the 8,412 / 4,900 duplicate event ids (byte-identical rows, one kept). Each has a pgTAP case in `supabase/tests/0004_import_campaigns_events.test.sql` (134 cases: both normalisers, every reject / warn reason, cross-brand parent, follow-a-routed-contact, `campaign_id` never resolved by `external_id` alone, idempotency with a fresh and with the same `run_id`).
 
-**Hosted full load pending: needs DB password.** Every migration is pushed (`supabase migration list`: `0000–0015` local = remote). The seed itself runs over the Supavisor **session** pooler with the project's database password (`SUPABASE_DB_PASSWORD` is not in this environment); exact command, from the repo root with Node 22:
+**Hosted full load — done 2026-09-16 (run twice).** Command as documented above, from the repo root with Node 22, over the Supavisor session pooler. Run 1 (269.8 s) inserted exactly the local numbers; run 2 inserted 0 / updated 0 across every file (`unchanged` = every loaded row, `already_present` = every event and send-log batch):
 
-```bash
-# hosted — one-time engineer-run job over the session pooler (port 5432, needed for COPY and the long import calls)
-NEXT_PUBLIC_SUPABASE_URL=https://qaocabdpaxetofqcfgsa.supabase.co \
-SUPABASE_SERVICE_ROLE_KEY="$(supabase projects api-keys --project-ref qaocabdpaxetofqcfgsa --reveal -o json | jq -r '.[] | select(.type=="secret") | .api_key')" \
-DATABASE_URL="postgresql://postgres.qaocabdpaxetofqcfgsa:${SUPABASE_DB_PASSWORD}@aws-1-eu-west-1.pooler.supabase.com:5432/postgres" \
-pnpm seed
-```
+| brand | contacts | routed in | campaigns | seed events | unknown campaign | seed sends | contactable | suppressed |
+|---|---|---|---|---|---|---|---|---|
+| KILELE | 82,600 | 88 | 44 | 303,588 | 0 | 7 | 36,446 | 23,538 |
+| KAROO | 12,718 | 312 | 19 | 69,100 | 0 | 0 | 501 | 11,951 |
+| MARRAKECH | 918 | 0 | 6 | 940 | 633 | 0 | 230 | 438 |
 
-Expected output: the tables above (the hosted `contacts` start empty, so the four contacts runs report the first-load numbers from *Import — contacts*). Run it twice and paste both `Import summary` tables here in place of this paragraph.
-
-#### Import — send log (local, 2026-09-15)
-
-`supabase/migrations/0010_send_log.sql` (`0006_sends.sql` is frozen on hosted — amendment S20) adds `internal.import_send_log(run_id)`, the last importer in the D-3 order (it needs the brand's campaigns). Reject `wrong_column_count` (`ncols <> 5`) / `blank_batch_key`; collapse by `batch_key` — the last row (highest `row_no`) wins and every superseded row gets one warn `duplicate_batch_key` and is never judged further; then on the surviving row reject `unknown_campaign` (looked up in the **file** brand only), `unparseable_queued_at` (`internal.normalize_signup_at`, ISO-8601 UTC), `unparseable_recipient_count` (`internal.normalize_int`). Insert `sends(brand_id, campaign_id, source = 'seed_send_log', batch_key, status = 'complete', recipient_count, confirmed_at = dispatched_at = queued_at_utc)` with `on conflict (batch_key) do nothing` — the unique constraint on `sends.batch_key` is the idempotency key, `already_present = candidates − inserted`. The file's `status` column is always `sent` and is not stored; `confirmed_by` / `body_sha256` / `batch_id` / `accepted_count` stay null. `complete` is terminal, so a seed send never blocks a later portal send of the same campaign (FR-21). Send-log batches are send **history**, never a rate denominator: `v_campaign_performance` still reads the campaign's `reported_*` — `BATCH-0007` carries 9,800 recipients while KIL-0016 reports `reported_sent` 10,640, and the page keeps 10,640 (delivered rate 95.00%, caption "as reported by the source").
-
-`pnpm seed` twice (users → stage → the 11 imports, 19.7 s then 19.9 s, both exit 0); the send-log line each time:
-
-```
-import kilele-send-log.csv  staged 9  loaded 7  inserted 7  rejected 0  routed 0  warnings 2   (first run)
-import kilele-send-log.csv  staged 9  loaded 7  inserted 0  rejected 0  routed 0  warnings 2   (second run — already_present 7)
-```
-
-9 staged rows → **7 sends** (`BATCH-0001`…`BATCH-0007`, one per Kilele campaign KIL-0012 / KIL-0044 / KIL-0007 / KIL-0021 / KIL-0031 / KIL-0009 / KIL-0016, `recipient_count` and `confirmed_at = dispatched_at` byte-for-byte the CSV's values); `BATCH-0003` ×3 (CSV lines 3, 6, 7 — byte-identical) collapsed to one send (line 7 wins) with 2 `duplicate_batch_key` warnings on rows 3 and 6 (`row_no` = the CSV line, header = 1); **0 rejected** (every campaign resolves in KILELE, every stamp and count parses). The second run inserted 0 (`already_present 7`), `select count(*) from sends where source = 'seed_send_log'` = 7 before and after; the per-brand verification table now ends with `seed_sends` = KILELE 7 / KAROO 0 / MARRAKECH 0. pgTAP `supabase/tests/0010_send_log.test.sql` (68 cases) pins the function's shape and grant surface, every reject / warn reason with its `detail`, the collapse (last row wins, a superseded row is only warned even when its own values are bad), the inserted row's fields, idempotency with the same and with a fresh `run_id` (zero rejects in the second run), a pending portal send next to a complete seed send, the campaign's `reported_*` untouched, another brand's file, and RLS on the result.
-
-#### Events ingest + suppression backfill (Story 6.2, local, 2026-09-15)
-
-`supabase/migrations/0012_events_ingest.sql` adds the monotonic suppression trigger (`trg_events_insert_suppress`: an ingested `bounced` / `unsubscribed` / `complained` event sets `contacts.suppressed_at = coalesce(occurred_at, now())` when null and only ever moves it **earlier** — never cleared, never later, same value whatever the arrival order) and **backfills it from the seed events loaded in Epic 2** (the trigger did not exist then — amendment S4). This is the re-measure the "Contactable" tile promised since Story 3.1 (its rule already said "no ingested bounced / unsubscribed / complained event"; the number could not honour it until now):
-
-| | KILELE | KAROO | MARRAKECH |
-|---|---|---|---|
-| contactable before the backfill (Story 3.1) | 51,298 | 5,760 | 449 |
-| **contactable after** | **36,446** | **501** | **230** |
-| contacts flipped by the backfill | **14,852** | 5,259 | 219 |
-| contacts carrying `suppressed_at` (bounced / unsubscribed / complained) | 23,538 (11,315 / 601 / 11,622) | 11,951 | 438 |
-
-Kilele's 14,852 is exactly the "~14,852 contactable contacts with a terminal seed event" that Stories 3.1 and 4.1 flagged as the least-sure figure. Consequently the recipient preview of `KIL-0016` (email, untargeted) reads **35,547** recipients (was 50,064): excluded `not_contactable` 45,759, `no_address` 899, `country_mismatch_or_unknown` 0 — still summing to the 82,205 non-deleted Kilele contacts; `KIL-0001` (KE-targeted) 23,678 / 45,759 / 899 / 11,869. The dispatch suite's timing line now reads `35547 recipients → reporting in ~0.5 s`. The count is computed by the migration itself (`raise notice 'suppression backfill …'` per brand) — nothing in `metric_rules` is consulted or changed.
-
-Ingest (`internal.ingest_provider_events(send_id, batch_id, events jsonb)`) follows the probe (`docs/provider-api.md`, `## Probe 2026-09-15`): tenancy from the send's snapshot only (`brand_code` in the payload is never read); a recipient is resolved **only** through the send's `send_recipients` — the provider forges one event per batch for a real contact who was not in the batch, and those are dropped and counted (`foreign_recipient`), so a Kilele batch can never suppress a Karoo contact; dedupe on `(batch_id, event_id)` (stored `event_id = <batch_id>:<provider id>`, raw payload kept); an unknown `type` inserts as `unknown`; `occurred_at` is stored verbatim even when it is in the future; a poison element (a string, a number, no ids, a null type) never aborts the page. `internal.recipient_state` reads by precedence (`unsubscribed | complained > bounced > delivered`), not by time — `delivered` is re-appended after `opened` and after `bounced`. `v_campaign_performance` now emits one `source = 'portal'` row per dispatched portal send beneath the campaign's `reported` row (`sent = accepted_count`; delivered / bounced / unsubscribed distinct per contact, opens / clicks total; `dispatched_at` appended as the last column); seed send-log sends get no row. `internal.poll_log` + `poll_status` (`… provider_error, deferred`), `public.v_last_sync` and `public.last_poll_status()` are the sync surfaces Story 6.3 fills. pgTAP `supabase/tests/0012_events_ingest.test.sql` (160 cases): the same 20 events in order, reversed, shuffled and doubled → identical suppression / events / performance rows; `bounced` at T2 then `delivered` at T3 stays suppressed at T2; the earlier of `bounced` T2 / `complained` T3 wins whatever arrives first; the three forged recipients are dropped; the trigger's `WHEN` clause pinned (the seed load never fires it).
-
-**Carried-in fixes in the same migration** (append-only migrations, `create or replace`): S19 — a seed event that follows a routed contact is stored as `<file brand>:<event_id>` (seed ids overlap 100 % across brands; the bare id collided with the target brand's native event), `normalize_int` / `normalize_spend` match `[0-9]` only (PG `\d` matches Unicode digits and the cast aborted the whole import), a campaign never parents itself, `import_runs.finished_at = clock_timestamp()`, `unknown_campaign` only for a non-blank pointer and `campaign_not_followed` for a followed row's pointer; 4.5 review — `import_send_log` rejects `unsupported_status` (status ≠ `sent`) and `repeated_header`, warns `batch_key_taken`; Epic 4 review (D-7) — `public.dispatch_mark_partial(send, reason)` (service-role CAS `confirmed|dispatched → partial`), the sweep stamps `dispatch_outcome_unknown_after_3_attempts` and turns candidates older than 24 h `partial` / `dispatch_expired` instead of re-POSTing them, `dispatch_record_result` answers a colliding `batch_id` with `failed` / `duplicate_batch_id: <id>` instead of a rolled-back 2xx. The `dispatch-send` Edge Function's 5xx / timeout branch now calls `dispatch_mark_partial` (`provider_<status>_outcome_unknown` / `provider_unreachable_outcome_unknown`) while the secret `DISPATCH_RETRY_ENABLED` is not `on` — it is unset until Story 6.3 enables the sweep in the same step (probe row a).
+Per-file rejected / routed / warnings on hosted equal the local table (71 / 312 / 27,378 for the Kilele base file, and so on). Suppression on hosted came from the `events` trigger firing during the seed load (the migration-time backfill was a no-op on an empty database), which is why the contactable figures match the local post-backfill numbers exactly.
 
 ## j. Contacts view — latency at the full load
 
@@ -645,6 +613,20 @@ _NFR-3: every portal page answers in under 2 s at the full load. **Local product
 | `/contacts?contactable=true&page=800` (page 800 of 1,026) | 57 ms | 58 ms |
 
 `explain analyze` of the `q=ami` page query as the analyst, under RLS through the `security_invoker` view: **72.9 ms** (brand-scoped scans; no extra index added — the trigram / `text_pattern_ops` indexes from `0002` are not what a contains-search uses, and the budget has 10× headroom). Same build, same session (3.2 / 3.4 review runs): `/dashboard` p50 42 ms / max 50 ms, `/campaigns` p50 42 ms / max 50 ms, `/campaigns/<id>` p50 31 ms / max 35 ms. `next dev` requests are 0.1–0.7 s and are not the measurement.
+
+**Hosted (2026-09-16, PostgREST over the public API with a Kilele analyst JWT, 10 requests each, from a laptop to eu-west-1):**
+
+| query | p50 | max of 10 (≈ p95) |
+|---|---|---|
+| contacts page 1, `count=exact` | 420 ms | 1,779 ms (first, cold) |
+| contacts search `q=ami` | 508 ms | 651 ms |
+| contacts `contactable=true`, page 800 | 427 ms | 680 ms |
+| `v_dashboard_totals` | 317 ms | 588 ms |
+| `v_signups_30d` | 259 ms | 422 ms |
+| `v_campaign_performance` | 221 ms | 437 ms |
+| `recipient_preview` (KIL-0016) | 414 ms | 714 ms |
+
+All inside NFR-3's ≤ 2 s. The same session returned 0 rows for `contacts?brand_id=neq.<KILELE>` (isolation on hosted, as a grader would test it).
 
 ## k. What we tried to break
 

@@ -14,6 +14,5 @@ Contactable — Kilele **36,446** (caption: consent = true, blank = not consente
 
 ## What isn't finished
 
-- Hosted seed load not yet run: hosted tables stay empty until `pnpm seed` runs over the session pooler with the database password (command in README (i)); the hosted latency re-measure and the share link wait on it.
 - Google sign-in on hosted: provider not yet enabled (needs Joe's Google Cloud OAuth client); button, callback and refusal path are built and tested.
 - Review "Low" items deferred per story; none security-relevant.
