@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { MobileNav } from "@/components/layout/mobile-nav";
+import { NavLinks } from "@/components/layout/nav-links";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { AppRole } from "@/lib/current-user";
@@ -35,15 +36,7 @@ export function PortalNav({ brandName, role, email }: Props) {
           <Badge variant={role === "owner" ? "default" : "secondary"} className="shrink-0" data-testid="role-badge">
             {ROLE_LABEL[role]}
           </Badge>
-          <ul className="hidden items-center gap-3 md:flex" data-testid="nav-links">
-            {NAV_LINKS.map((link) => (
-              <li key={link.href}>
-                <Link href={link.href} className="hover:underline">
-                  {link.label}
-                </Link>
-              </li>
-            ))}
-          </ul>
+          <NavLinks links={NAV_LINKS} />
         </div>
         <div className="flex shrink-0 items-center gap-3">
           <span className="hidden text-muted-foreground md:inline">{email}</span>

@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import type { AppRole } from "@/lib/current-user";
+import { isCurrentPath } from "@/components/layout/nav-links";
 
 const ROLE_LABEL: Record<AppRole, string> = { owner: "Owner", analyst: "Analyst" };
 
@@ -60,7 +61,7 @@ export function MobileNav({ brandName, role, email, links }: MobileNavProps) {
                 <Link
                   href={link.href}
                   onClick={() => setOpen(false)}
-                  aria-current={pathname === link.href || pathname.startsWith(`${link.href}/`) ? "page" : undefined}
+                  aria-current={isCurrentPath(pathname, link.href) ? "page" : undefined}
                   className="flex min-h-11 items-center rounded-md px-2 text-base font-medium hover:bg-accent aria-[current=page]:bg-muted"
                   data-testid="nav-sheet-link"
                 >
