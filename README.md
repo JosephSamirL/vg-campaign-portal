@@ -458,7 +458,7 @@ Wall-clock, from the artifact and commit timestamps — honest framing: this is 
 | Build — 46 commits from the untouched `create-next-app` starter (`431a43a`, 10:44) to the last review-fix commit (`343e192`, 23:58), Epics 1 → 7, hosted pushes and deploys, the provider probe | 2026-09-15 | **~13 h** |
 | Submission pack — this README, `docs/submission-note.md`, `docs/submission-email.md`, the secret sweep, the tag | 2026-09-16 | ~1.5 h |
 
-Not included: the hosted seed load and the Google provider toggle, which are still pending (see `docs/submission-note.md`, "What isn't finished").
+Not included: the hosted seed load and the Google provider toggle, which are still ON (enabled 2026-09-16; joegmes@gmail.com signed in via Google and linked to the pre-created Kilele-owner row) (see `docs/submission-note.md`, "What isn't finished").
 
 ## i. Seed counts per brand — loaded / rejected / routed / warned
 

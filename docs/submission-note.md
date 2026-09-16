@@ -14,5 +14,4 @@ Contactable — Kilele **36,446** (caption: consent = true, blank = not consente
 
 ## What isn't finished
 
-- Google sign-in on hosted: provider not yet enabled (needs Joe's Google Cloud OAuth client); button, callback and refusal path are built and tested.
 - Review "Low" items deferred per story; none security-relevant.
